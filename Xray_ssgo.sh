@@ -245,7 +245,7 @@ EOF
 init_xray_config() {
     mkdir -p "${work_dir}"
     if [ ! -f "${config_dir}" ]; then
-        # 完全移除 dns 模块
+        # 【移除 DoH】彻底消除域名解析时的 TLS 握手延迟
         cat > "${config_dir}" << EOF
 {
   "log": { "access": "/dev/null", "error": "/dev/null", "loglevel": "none" },
@@ -523,7 +523,7 @@ install_argo_multiplex() {
     local tunnel_id=$(echo "$argo_auth" | jq -r '.TunnelID' 2>/dev/null || echo "$argo_auth" | cut -d'"' -f12)
     echo "$argo_auth" > "${work_dir}/tunnel_argo.json"
 
-    # 将 protocol 设置为 quic
+    # 【强制 QUIC】
     cat > "${work_dir}/tunnel_argo.yml" << EOF
 tunnel: ${tunnel_id}
 credentials-file: ${work_dir}/tunnel_argo.json
@@ -589,7 +589,7 @@ EOF
     manage_service restart ${svc_name}
     manage_service restart xray
     
-    green "Argo(WS+XHTTP+SS) 隧道分流服务部署完毕！QUIC协议已启用。"
+    green "Argo(WS+XHTTP+SS) 隧道分流服务部署完毕！"
     get_info
 }
 
@@ -667,11 +667,19 @@ manage_restart() {
             fi
             green "服务定时重启已关闭"
         else
-            if ! command -v crontab >/dev/null 2>&1; then
-                if command -v apt-get >/dev/null 2>&1; then manage_packages cron
-                else manage_packages cronie; fi
-                manage_service enable cron 2>/dev/null || manage_service enable crond 2>/dev/null
-                manage_service start cron 2>/dev/null || manage_service start crond 2>/dev/null
+            # 【修复 Alpine 的 cron 安装】绕过 BusyBox 假命令，直接装 dcron
+            if ! command -v crontab >/dev/null 2>&1 || [ -f /etc/alpine-release ]; then
+                if command -v apt-get >/dev/null 2>&1; then 
+                    manage_packages cron
+                    manage_service enable cron 2>/dev/null; manage_service start cron 2>/dev/null
+                elif command -v apk >/dev/null 2>&1; then 
+                    manage_packages dcron
+                    rc-service dcron start 2>/dev/null || true
+                    rc-update add dcron default >/dev/null 2>&1 || true
+                else 
+                    manage_packages cronie
+                    manage_service enable crond 2>/dev/null; manage_service start crond 2>/dev/null
+                fi
             fi
             
             local restart_cmd="systemctl restart xray tunnel-argo"
