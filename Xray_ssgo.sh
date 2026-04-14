@@ -245,11 +245,11 @@ EOF
 init_xray_config() {
     mkdir -p "${work_dir}"
     if [ ! -f "${config_dir}" ]; then
+        # 完全移除 dns 模块
         cat > "${config_dir}" << EOF
 {
   "log": { "access": "/dev/null", "error": "/dev/null", "loglevel": "none" },
   "inbounds": [],
-  "dns": { "servers": ["https+local://8.8.8.8/dns-query"] },
   "outbounds": [
     { "protocol": "freedom", "tag": "direct" },
     { "protocol": "blackhole", "tag": "block" }
@@ -523,10 +523,11 @@ install_argo_multiplex() {
     local tunnel_id=$(echo "$argo_auth" | jq -r '.TunnelID' 2>/dev/null || echo "$argo_auth" | cut -d'"' -f12)
     echo "$argo_auth" > "${work_dir}/tunnel_argo.json"
 
+    # 将 protocol 设置为 quic
     cat > "${work_dir}/tunnel_argo.yml" << EOF
 tunnel: ${tunnel_id}
 credentials-file: ${work_dir}/tunnel_argo.json
-protocol: http2
+protocol: quic
 ingress:
   - hostname: ${argo_domain}
     path: /argo
@@ -588,7 +589,7 @@ EOF
     manage_service restart ${svc_name}
     manage_service restart xray
     
-    green "Argo(WS+XHTTP+SS) 隧道分流服务部署完毕！"
+    green "Argo(WS+XHTTP+SS) 隧道分流服务部署完毕！QUIC协议已启用。"
     get_info
 }
 
