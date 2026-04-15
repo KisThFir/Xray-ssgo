@@ -99,7 +99,7 @@ get_sys_info() {
     elif [ -f /etc/os-release ]; then
         . /etc/os-release
         if [ -n "$ID" ] && [ -n "$VERSION_ID" ]; then
-            local os_name=$(echo "$ID" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
+            local os_name=$(echo "$ID" | sed -e 's/^[a-z]/\U&/')
             os_ver="${os_name} ${VERSION_ID}"
         elif [ -n "$PRETTY_NAME" ]; then
             os_ver="${PRETTY_NAME}"
@@ -128,6 +128,7 @@ get_sys_info() {
     SYS_INFO_CACHE="${os_ver} | ${kernel_ver} | ${virt^^} | ${mem} | ${disk}"
 }
 
+# [修复] 双请求并行，加快检测速度
 check_system_ip() {
     [ "$IP_CHECKED" = "1" ] && return
     local DEFAULT_LOCAL_INTERFACE4=$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
@@ -221,6 +222,7 @@ check_status() {
     return 1
 }
 
+# [修复] 补充 coreutils 检测映射，避免每次都触发无效 apt-get update
 manage_packages() {
     local need_update=1
     for package in "$@"; do
@@ -350,7 +352,7 @@ install_core() {
         chmod +x "${work_dir}/argo"
     fi
 
-    if [ ! -f /etc/systemd/system/xray.service ] && [ ! -f /etc/init.d/xray ]; then
+    if [ ! -f /etc/systemd/system/xray.service ] && ! [ -f /etc/init.d/xray ]; then
         if [ -f /etc/alpine-release ]; then
             cat > /etc/init.d/xray << EOF
 #!/sbin/openrc-run
@@ -418,7 +420,8 @@ apply_freeflow_config() {
     local cur_uuid=$(get_current_uuid)
     update_config 'del(.inbounds[] | select(.port == 80))'
     if [ "${FREEFLOW_MODE}" != "none" ]; then
-        local ff_json='{"port": 80, "listen": "::", "protocol": "vless", "settings": { "clients": [{ "id": "'${cur_uuid}'" }], "decryption": "none" }, "streamSettings": { "network": "'${FREEFLOW_MODE}'", "security": "none", "'${FREEFLOW_MODE}'Settings": { "path": "'${FF_PATH}'" } }, "sniffing": { "enabled": true, "destOverride": ["http","tls","quic","dns"], "metadataOnly": false }}'
+        # [修复] destOverride 移除非法的 "dns"
+        local ff_json='{"port": 80, "listen": "::", "protocol": "vless", "settings": { "clients": [{ "id": "'${cur_uuid}'" }], "decryption": "none" }, "streamSettings": { "network": "'${FREEFLOW_MODE}'", "security": "none", "'${FREEFLOW_MODE}'Settings": { "path": "'${FF_PATH}'" } }, "sniffing": { "enabled": true, "destOverride": ["http","tls","quic"], "metadataOnly": false }}'
         update_config --argjson ib "${ff_json}" '.inbounds += [$ib]'
     fi
 }
@@ -495,8 +498,9 @@ manage_socks5() {
                 cls; install_core
                 prompt "输入监听端口 (如 1080): " ns_port; prompt "输入用户名: " ns_user; prompt "输入密码: " ns_pass
                 if [[ -n "$ns_port" && "$ns_port" =~ ^[0-9]+$ && -n "$ns_user" && -n "$ns_pass" ]]; then
+                    # [修复] destOverride 移除非法的 "dns"
                     update_config --argjson p "$ns_port" --arg u "$ns_user" --arg pw "$ns_pass" \
-                        '.inbounds += [{"tag": ("socks-" + ($p|tostring)),"port": $p,"listen": "0.0.0.0","protocol": "socks","settings": { "auth": "password", "accounts": [{ "user": $u, "pass": $pw }], "udp": true }, "sniffing": {"enabled": true, "destOverride": ["http","tls","dns"], "metadataOnly": false}}]'
+                        '.inbounds += [{"tag": ("socks-" + ($p|tostring)),"port": $p,"listen": "0.0.0.0","protocol": "socks","settings": { "auth": "password", "accounts": [{ "user": $u, "pass": $pw }], "udp": true }, "sniffing": {"enabled": true, "destOverride": ["http","tls"], "metadataOnly": false}}]'
                     green "添加成功！请确保服务器防火墙已放行 $ns_port 端口。"; manage_service restart xray
                 else
                     red "输入无效！端口必须为数字，且用户名和密码不能为空。"
@@ -585,6 +589,7 @@ install_argo_multiplex() {
     local tunnel_id=$(echo "$argo_auth" | jq -r '.TunnelID' 2>/dev/null || echo "$argo_auth" | cut -d'"' -f12)
     echo "$argo_auth" > "${work_dir}/tunnel_argo.json"
 
+    # 【强制 HTTP/2】
     cat > "${work_dir}/tunnel_argo.yml" << EOF
 tunnel: ${tunnel_id}
 credentials-file: ${work_dir}/tunnel_argo.json
@@ -612,9 +617,10 @@ EOF
     
     update_config 'del(.inbounds[] | select(.port == 8080 or .port == 8081 or .port == 8082))'
     
-    local ws_json='{"port": 8080, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/argo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic", "dns"], "routeOnly": false}}'
-    local xhttp_json='{"port": 8081, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "xhttp", "security": "none", "xhttpSettings": {"host": "", "path": "/xgo", "mode": "auto"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic", "dns"], "routeOnly": false}}'
-    local ss_json='{"port": 8082, "listen": "127.0.0.1", "protocol": "shadowsocks", "settings": {"method": "'${ss_method}'", "password": "'${ss_pass}'", "network": "tcp,udp"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/ssgo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic", "dns"], "routeOnly": false}}'
+    # [修复] destOverride 移除非法的 "dns"，保持其余原样
+    local ws_json='{"port": 8080, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/argo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
+    local xhttp_json='{"port": 8081, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "xhttp", "security": "none", "xhttpSettings": {"host": "", "path": "/xgo", "mode": "auto"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
+    local ss_json='{"port": 8082, "listen": "127.0.0.1", "protocol": "shadowsocks", "settings": {"method": "'${ss_method}'", "password": "'${ss_pass}'", "network": "tcp,udp"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/ssgo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
     
     update_config --argjson ws "$ws_json" --argjson xhttp "$xhttp_json" --argjson ss "$ss_json" '.inbounds += [$ws, $xhttp, $ss]'
 
@@ -622,6 +628,7 @@ EOF
     local svc_name="tunnel-argo"
 
     if [ -f /etc/alpine-release ]; then
+        # 用 wrapper 脚本规避 OpenRC command_args 引号嵌套风险
         cat > "${work_dir}/argo_start.sh" << EOF
 #!/bin/sh
 exec ${exec_cmd}
@@ -675,11 +682,11 @@ get_info() {
         
         local name_xhttp="${NODE_PREFIX} - XHTTP"
         local link_xhttp="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&alpn=h2&fp=chrome&type=xhttp&host=${domain_argo}&path=%2Fxgo#$(url_encode "$name_xhttp")"
-        purple "${link_xhttp}"; echo ""; node_count=$((node_count + 1))
+        purple "${link_xhttp}"; echo ""; ((node_count++))
         
         local name_ws="${NODE_PREFIX} - WS"
         local link_ws="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&fp=chrome&type=ws&host=${domain_argo}&path=%2Fargo%3Fed%3D2560#$(url_encode "$name_ws")"
-        purple "${link_ws}"; echo ""; node_count=$((node_count + 1))
+        purple "${link_ws}"; echo ""; ((node_count++))
 
         local ss_ib=$(jq -c '.inbounds[]? | select(.protocol == "shadowsocks" and .port == 8082)' "$config_dir" 2>/dev/null)
         if [ -n "$ss_ib" ]; then
@@ -688,9 +695,9 @@ get_info() {
             local name_ss="${NODE_PREFIX} - SS"
             
             local b64=$(echo -n "${m}:${pw}" | base64 | tr -d '\n')
-            local link_ss="ss://${b64}@${CFIP}:443?type=ws&security=tls&sni=${domain_argo}&host=${domain_argo}&path=%2Fssgo#$(url_encode "$name_ss")"
+            local link_ss="ss://${b64}@${CFIP}:80?type=ws&security=none&host=${domain_argo}&path=%2Fssgo#$(url_encode "$name_ss")"
             
-            purple "${link_ss}"; echo ""; node_count=$((node_count + 1))
+            purple "${link_ss}"; echo ""; ((node_count++))
         fi
     fi
 
@@ -701,7 +708,7 @@ get_info() {
         
         local name_ff="${NODE_PREFIX} - FF-${ff_node_name}"
         local link="vless://${cur_uuid}@${IP}:80?encryption=none&security=none&type=${FREEFLOW_MODE}&host=${IP}&path=${path_enc}#$(url_encode "$name_ff")"
-        purple "${link}"; echo ""; node_count=$((node_count + 1))
+        purple "${link}"; echo ""; ((node_count++))
     fi
     
     if [ -f "${config_dir}" ] && [ -n "$IP" ]; then
@@ -711,7 +718,7 @@ get_info() {
                 local p=$(echo "$line" | jq -r '.port'); local u=$(echo "$line" | jq -r '.settings.accounts[0].user'); local pw=$(echo "$line" | jq -r '.settings.accounts[0].pass')
                 local name_socks="${NODE_PREFIX} - Socks5-${p}"
                 local link="socks5://${u}:${pw}@${IP}:${p}#$(url_encode "$name_socks")"
-                purple "${link}"; echo ""; node_count=$((node_count + 1))
+                purple "${link}"; echo ""; ((node_count++))
             done <<< "$socks_list"
         fi
     fi
@@ -740,8 +747,8 @@ manage_restart() {
                     manage_service enable cron 2>/dev/null; manage_service start cron 2>/dev/null
                 elif command -v apk >/dev/null 2>&1; then 
                     manage_packages dcron
-                    rc-service crond start 2>/dev/null || rc-service dcron start 2>/dev/null || true
-                    rc-update add crond default 2>/dev/null || rc-update add dcron default 2>/dev/null || true
+                    rc-service dcron start 2>/dev/null || true
+                    rc-update add dcron default >/dev/null 2>&1 || true
                 else 
                     manage_packages cronie
                     manage_service enable crond 2>/dev/null; manage_service start crond 2>/dev/null
