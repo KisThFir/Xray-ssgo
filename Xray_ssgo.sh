@@ -99,7 +99,7 @@ get_sys_info() {
     elif [ -f /etc/os-release ]; then
         . /etc/os-release
         if [ -n "$ID" ] && [ -n "$VERSION_ID" ]; then
-            local os_name=$(echo "$ID" | sed -e 's/^[a-z]/\U&/')
+            local os_name=$(echo "$ID" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
             os_ver="${os_name} ${VERSION_ID}"
         elif [ -n "$PRETTY_NAME" ]; then
             os_ver="${PRETTY_NAME}"
@@ -142,7 +142,23 @@ check_system_ip() {
         [ -n "$DEFAULT_LOCAL_IP6" ] && BIND_ADDRESS6="--bind-address=$DEFAULT_LOCAL_IP6"
     fi
 
-    local IP4_JSON=$(wget $BIND_ADDRESS4 -4 -qO- --no-check-certificate --tries=2 --timeout=2 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null)
+    local tmp4=$(mktemp)
+    local tmp6=$(mktemp)
+
+    wget $BIND_ADDRESS4 -4 -qO- --no-check-certificate --tries=2 --timeout=2 \
+        "https://ip.cloudflare.now.cc?lang=zh-CN" > "$tmp4" 2>/dev/null &
+    local pid4=$!
+
+    wget $BIND_ADDRESS6 -6 -qO- --no-check-certificate --tries=2 --timeout=2 \
+        "https://ip.cloudflare.now.cc?lang=zh-CN" > "$tmp6" 2>/dev/null &
+    local pid6=$!
+
+    wait "$pid4" "$pid6"
+
+    local IP4_JSON=$(cat "$tmp4")
+    local IP6_JSON=$(cat "$tmp6")
+    rm -f "$tmp4" "$tmp6"
+
     if [ -n "$IP4_JSON" ]; then
         WAN4=$(awk -F '"' '/"ip"/{print $4}' <<< "$IP4_JSON")
         COUNTRY4=$(awk -F '"' '/"country"/{print $4}' <<< "$IP4_JSON")
@@ -153,7 +169,6 @@ check_system_ip() {
         ISP_CLEAN4=$(echo "$RAW_ISP4" | sed -E 's/AS[0-9]+[ -]*//g' | sed -E 's/[, ]*(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|Hosting|Host).*$//i' | sed -E 's/ *$//')
     fi
 
-    local IP6_JSON=$(wget $BIND_ADDRESS6 -6 -qO- --no-check-certificate --tries=2 --timeout=2 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null)
     if [ -n "$IP6_JSON" ]; then
         WAN6=$(awk -F '"' '/"ip"/{print $4}' <<< "$IP6_JSON")
         COUNTRY6=$(awk -F '"' '/"country"/{print $4}' <<< "$IP6_JSON")
@@ -209,8 +224,12 @@ check_status() {
 manage_packages() {
     local need_update=1
     for package in "$@"; do
-        local cmd_check="$package"
-        [ "$package" = "iproute2" ] && cmd_check="ip"
+        local cmd_check
+        case "$package" in
+            iproute2)  cmd_check="ip"     ;;
+            coreutils) cmd_check="base64" ;;
+            *)         cmd_check="$package" ;;
+        esac
         command -v "$cmd_check" > /dev/null 2>&1 && continue
         
         if [ "$need_update" -eq 1 ]; then
@@ -245,17 +264,59 @@ EOF
 init_xray_config() {
     mkdir -p "${work_dir}"
     if [ ! -f "${config_dir}" ]; then
-        # 【移除 DoH】彻底消除域名解析时的 TLS 握手延迟
-        cat > "${config_dir}" << EOF
+        cat > "${config_dir}" << 'EOF'
 {
   "log": { "access": "/dev/null", "error": "/dev/null", "loglevel": "none" },
+  "dns": {
+    "servers": [
+      {
+        "address": "https://1.1.1.1/dns-query",
+        "queryStrategy": "UseIPv4"
+      }
+    ],
+    "queryStrategy": "UseIPv4"
+  },
   "inbounds": [],
   "outbounds": [
     { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
-  ]
+    { "protocol": "blackhole", "tag": "block" },
+    { "protocol": "dns", "tag": "dns-out" }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      { "type": "field", "port": "53", "outboundTag": "dns-out" },
+      { "type": "field", "protocol": "dns", "outboundTag": "dns-out" }
+    ]
+  }
 }
 EOF
+    fi
+}
+
+ensure_dns_routing() {
+    init_xray_config
+
+    local has_dns
+    has_dns=$(jq 'has("dns")' "${config_dir}" 2>/dev/null)
+    if [ "$has_dns" != "true" ]; then
+        update_config '.dns = {"servers":[{"address":"https://1.1.1.1/dns-query","queryStrategy":"UseIPv4"}],"queryStrategy":"UseIPv4"}'
+    fi
+
+    local has_dnsout
+    has_dnsout=$(jq '[.outbounds[]?.tag] | contains(["dns-out"])' "${config_dir}" 2>/dev/null)
+    if [ "$has_dnsout" != "true" ]; then
+        update_config '.outbounds += [{"protocol":"dns","tag":"dns-out"}]'
+    fi
+
+    if ! jq -e '.routing' "${config_dir}" >/dev/null 2>&1; then
+        update_config '.routing = {"domainStrategy":"AsIs","rules":[]}'
+    fi
+
+    local has_port53
+    has_port53=$(jq '[.routing.rules[]? | select(.port=="53")] | length' "${config_dir}" 2>/dev/null)
+    if [ "${has_port53:-0}" -eq 0 ]; then
+        update_config '.routing.rules += [{"type":"field","port":"53","outboundTag":"dns-out"},{"type":"field","protocol":"dns","outboundTag":"dns-out"}]'
     fi
 }
 
@@ -289,7 +350,7 @@ install_core() {
         chmod +x "${work_dir}/argo"
     fi
 
-    if [ ! -f /etc/systemd/system/xray.service ] && ! [ -f /etc/init.d/xray ]; then
+    if [ ! -f /etc/systemd/system/xray.service ] && [ ! -f /etc/init.d/xray ]; then
         if [ -f /etc/alpine-release ]; then
             cat > /etc/init.d/xray << EOF
 #!/sbin/openrc-run
@@ -353,11 +414,11 @@ ask_freeflow_mode() {
 }
 
 apply_freeflow_config() {
-    init_xray_config
+    ensure_dns_routing
     local cur_uuid=$(get_current_uuid)
     update_config 'del(.inbounds[] | select(.port == 80))'
     if [ "${FREEFLOW_MODE}" != "none" ]; then
-        local ff_json='{"port": 80, "listen": "::", "protocol": "vless", "settings": { "clients": [{ "id": "'${cur_uuid}'" }], "decryption": "none" }, "streamSettings": { "network": "'${FREEFLOW_MODE}'", "security": "none", "'${FREEFLOW_MODE}'Settings": { "path": "'${FF_PATH}'" } }, "sniffing": { "enabled": true, "destOverride": ["http","tls","quic"], "metadataOnly": false }}'
+        local ff_json='{"port": 80, "listen": "::", "protocol": "vless", "settings": { "clients": [{ "id": "'${cur_uuid}'" }], "decryption": "none" }, "streamSettings": { "network": "'${FREEFLOW_MODE}'", "security": "none", "'${FREEFLOW_MODE}'Settings": { "path": "'${FF_PATH}'" } }, "sniffing": { "enabled": true, "destOverride": ["http","tls","quic","dns"], "metadataOnly": false }}'
         update_config --argjson ib "${ff_json}" '.inbounds += [$ib]'
     fi
 }
@@ -403,7 +464,7 @@ manage_freeflow() {
 manage_socks5() {
     while true; do
         cls; printf '\033[1;33m正在读取 Socks5 配置...\033[0m\n'
-        init_xray_config
+        ensure_dns_routing
         local socks_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
         
         cls; printf '\033[1;35m                 管理 Socks5 代理              \033[0m\n'
@@ -434,7 +495,8 @@ manage_socks5() {
                 cls; install_core
                 prompt "输入监听端口 (如 1080): " ns_port; prompt "输入用户名: " ns_user; prompt "输入密码: " ns_pass
                 if [[ -n "$ns_port" && "$ns_port" =~ ^[0-9]+$ && -n "$ns_user" && -n "$ns_pass" ]]; then
-                    update_config --argjson p "$ns_port" --arg u "$ns_user" --arg pw "$ns_pass" '.inbounds += [{"tag": ("socks-" + ($p|tostring)),"port": $p,"listen": "0.0.0.0","protocol": "socks","settings": { "auth": "password", "accounts": [{ "user": $u, "pass": $pw }], "udp": true }}]'
+                    update_config --argjson p "$ns_port" --arg u "$ns_user" --arg pw "$ns_pass" \
+                        '.inbounds += [{"tag": ("socks-" + ($p|tostring)),"port": $p,"listen": "0.0.0.0","protocol": "socks","settings": { "auth": "password", "accounts": [{ "user": $u, "pass": $pw }], "udp": true }, "sniffing": {"enabled": true, "destOverride": ["http","tls","dns"], "metadataOnly": false}}]'
                     green "添加成功！请确保服务器防火墙已放行 $ns_port 端口。"; manage_service restart xray
                 else
                     red "输入无效！端口必须为数字，且用户名和密码不能为空。"
@@ -489,7 +551,7 @@ manage_socks5() {
 install_argo_multiplex() {
     cls
     install_core
-    init_xray_config
+    ensure_dns_routing
     
     echo ""; yellow "正在配置 Argo 路径分流 (WS + XHTTP + SS)"
     skyblue "  => VLESS+WS 本地端口: 8080 (Cloudflare 云端路径: /argo)"
@@ -523,11 +585,10 @@ install_argo_multiplex() {
     local tunnel_id=$(echo "$argo_auth" | jq -r '.TunnelID' 2>/dev/null || echo "$argo_auth" | cut -d'"' -f12)
     echo "$argo_auth" > "${work_dir}/tunnel_argo.json"
 
-    # 【强制 QUIC】
     cat > "${work_dir}/tunnel_argo.yml" << EOF
 tunnel: ${tunnel_id}
 credentials-file: ${work_dir}/tunnel_argo.json
-protocol: quic
+protocol: http2
 ingress:
   - hostname: ${argo_domain}
     path: /argo
@@ -551,9 +612,9 @@ EOF
     
     update_config 'del(.inbounds[] | select(.port == 8080 or .port == 8081 or .port == 8082))'
     
-    local ws_json='{"port": 8080, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/argo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
-    local xhttp_json='{"port": 8081, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "xhttp", "security": "none", "xhttpSettings": {"host": "", "path": "/xgo", "mode": "auto"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
-    local ss_json='{"port": 8082, "listen": "127.0.0.1", "protocol": "shadowsocks", "settings": {"method": "'${ss_method}'", "password": "'${ss_pass}'", "network": "tcp,udp"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/ssgo"}}}'
+    local ws_json='{"port": 8080, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/argo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic", "dns"], "routeOnly": false}}'
+    local xhttp_json='{"port": 8081, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "xhttp", "security": "none", "xhttpSettings": {"host": "", "path": "/xgo", "mode": "auto"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic", "dns"], "routeOnly": false}}'
+    local ss_json='{"port": 8082, "listen": "127.0.0.1", "protocol": "shadowsocks", "settings": {"method": "'${ss_method}'", "password": "'${ss_pass}'", "network": "tcp,udp"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/ssgo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic", "dns"], "routeOnly": false}}'
     
     update_config --argjson ws "$ws_json" --argjson xhttp "$xhttp_json" --argjson ss "$ss_json" '.inbounds += [$ws, $xhttp, $ss]'
 
@@ -561,13 +622,19 @@ EOF
     local svc_name="tunnel-argo"
 
     if [ -f /etc/alpine-release ]; then
+        cat > "${work_dir}/argo_start.sh" << EOF
+#!/bin/sh
+exec ${exec_cmd}
+EOF
+        chmod +x "${work_dir}/argo_start.sh"
         cat > /etc/init.d/${svc_name} << EOF
 #!/sbin/openrc-run
 description="Cloudflare Tunnel Multiplex"
-command="/bin/sh"
-command_args="-c '${exec_cmd} >> ${work_dir}/argo_dual.log 2>&1'"
+command="${work_dir}/argo_start.sh"
 command_background=true
 pidfile="/var/run/${svc_name}.pid"
+output_log="${work_dir}/argo_dual.log"
+error_log="${work_dir}/argo_dual.log"
 EOF
         chmod +x /etc/init.d/${svc_name}
     else
@@ -608,11 +675,11 @@ get_info() {
         
         local name_xhttp="${NODE_PREFIX} - XHTTP"
         local link_xhttp="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&alpn=h2&fp=chrome&type=xhttp&host=${domain_argo}&path=%2Fxgo#$(url_encode "$name_xhttp")"
-        purple "${link_xhttp}"; echo ""; ((node_count++))
+        purple "${link_xhttp}"; echo ""; node_count=$((node_count + 1))
         
         local name_ws="${NODE_PREFIX} - WS"
         local link_ws="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&fp=chrome&type=ws&host=${domain_argo}&path=%2Fargo%3Fed%3D2560#$(url_encode "$name_ws")"
-        purple "${link_ws}"; echo ""; ((node_count++))
+        purple "${link_ws}"; echo ""; node_count=$((node_count + 1))
 
         local ss_ib=$(jq -c '.inbounds[]? | select(.protocol == "shadowsocks" and .port == 8082)' "$config_dir" 2>/dev/null)
         if [ -n "$ss_ib" ]; then
@@ -621,9 +688,9 @@ get_info() {
             local name_ss="${NODE_PREFIX} - SS"
             
             local b64=$(echo -n "${m}:${pw}" | base64 | tr -d '\n')
-            local link_ss="ss://${b64}@${CFIP}:80?type=ws&security=none&host=${domain_argo}&path=%2Fssgo#$(url_encode "$name_ss")"
+            local link_ss="ss://${b64}@${CFIP}:443?type=ws&security=tls&sni=${domain_argo}&host=${domain_argo}&path=%2Fssgo#$(url_encode "$name_ss")"
             
-            purple "${link_ss}"; echo ""; ((node_count++))
+            purple "${link_ss}"; echo ""; node_count=$((node_count + 1))
         fi
     fi
 
@@ -634,7 +701,7 @@ get_info() {
         
         local name_ff="${NODE_PREFIX} - FF-${ff_node_name}"
         local link="vless://${cur_uuid}@${IP}:80?encryption=none&security=none&type=${FREEFLOW_MODE}&host=${IP}&path=${path_enc}#$(url_encode "$name_ff")"
-        purple "${link}"; echo ""; ((node_count++))
+        purple "${link}"; echo ""; node_count=$((node_count + 1))
     fi
     
     if [ -f "${config_dir}" ] && [ -n "$IP" ]; then
@@ -644,7 +711,7 @@ get_info() {
                 local p=$(echo "$line" | jq -r '.port'); local u=$(echo "$line" | jq -r '.settings.accounts[0].user'); local pw=$(echo "$line" | jq -r '.settings.accounts[0].pass')
                 local name_socks="${NODE_PREFIX} - Socks5-${p}"
                 local link="socks5://${u}:${pw}@${IP}:${p}#$(url_encode "$name_socks")"
-                purple "${link}"; echo ""; ((node_count++))
+                purple "${link}"; echo ""; node_count=$((node_count + 1))
             done <<< "$socks_list"
         fi
     fi
@@ -667,15 +734,14 @@ manage_restart() {
             fi
             green "服务定时重启已关闭"
         else
-            # 【修复 Alpine 的 cron 安装】绕过 BusyBox 假命令，直接装 dcron
             if ! command -v crontab >/dev/null 2>&1 || [ -f /etc/alpine-release ]; then
                 if command -v apt-get >/dev/null 2>&1; then 
                     manage_packages cron
                     manage_service enable cron 2>/dev/null; manage_service start cron 2>/dev/null
                 elif command -v apk >/dev/null 2>&1; then 
                     manage_packages dcron
-                    rc-service dcron start 2>/dev/null || true
-                    rc-update add dcron default >/dev/null 2>&1 || true
+                    rc-service crond start 2>/dev/null || rc-service dcron start 2>/dev/null || true
+                    rc-update add crond default 2>/dev/null || rc-update add dcron default 2>/dev/null || true
                 else 
                     manage_packages cronie
                     manage_service enable crond 2>/dev/null; manage_service start crond 2>/dev/null
@@ -706,6 +772,7 @@ uninstall_component() {
         manage_service disable tunnel-argo
         rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
         rm -f "${work_dir}/domain_argo.txt" "${work_dir}/tunnel_argo.yml" "${work_dir}/tunnel_argo.json"
+        rm -f "${work_dir}/argo_start.sh" "${work_dir}/argo_dual.log"
         [ -f "${config_dir}" ] && update_config 'del(.inbounds[] | select(.port == 8080 or .port == 8081 or .port == 8082))'
         green "Argo (WS+XHTTP+SS) 已卸载关闭！"
         manage_service restart xray
