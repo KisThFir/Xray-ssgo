@@ -89,6 +89,9 @@ fi
 RESTART_INTERVAL=0
 [ -f "${restart_conf}" ] && RESTART_INTERVAL=$(cat "${restart_conf}" 2>/dev/null)
 
+XHTTP_MODE="auto"
+XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPaddingPlacement":"queryInHeader","xPaddingHeader":"y2k","xPaddingKey":"_y2k"}'
+
 get_sys_info() {
     [ -n "$SYS_INFO_CACHE" ] && return
     local os_ver kernel_ver virt mem disk
@@ -619,7 +622,39 @@ EOF
     
     # [修复] destOverride 移除非法的 "dns"，保持其余原样
     local ws_json='{"port": 8080, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/argo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
-    local xhttp_json='{"port": 8081, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "xhttp", "security": "none", "xhttpSettings": {"host": "", "path": "/xgo", "mode": "auto"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
+    
+    local xhttp_json
+    xhttp_json=$(jq -nc \
+        --arg uuid "$cur_uuid" \
+        --arg mode "$XHTTP_MODE" \
+        --argjson extra "$XHTTP_EXTRA_JSON" \
+        '{
+          "port": 8081,
+          "listen": "127.0.0.1",
+          "protocol": "vless",
+          "settings": {
+            "clients": [
+              { "id": $uuid }
+            ],
+            "decryption": "none"
+          },
+          "streamSettings": {
+            "network": "xhttp",
+            "security": "none",
+            "xhttpSettings": {
+              "host": "",
+              "path": "/xgo",
+              "mode": $mode,
+              "extra": $extra
+            }
+          },
+          "sniffing": {
+            "enabled": true,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": false
+          }
+        }')
+
     local ss_json='{"port": 8082, "listen": "127.0.0.1", "protocol": "shadowsocks", "settings": {"method": "'${ss_method}'", "password": "'${ss_pass}'", "network": "tcp,udp"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/ssgo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
     
     update_config --argjson ws "$ws_json" --argjson xhttp "$xhttp_json" --argjson ss "$ss_json" '.inbounds += [$ws, $xhttp, $ss]'
@@ -681,7 +716,9 @@ get_info() {
         local domain_argo=$(cat "${work_dir}/domain_argo.txt")
         
         local name_xhttp="${NODE_PREFIX} - XHTTP"
-        local link_xhttp="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&alpn=h2&fp=chrome&type=xhttp&host=${domain_argo}&path=%2Fxgo#$(url_encode "$name_xhttp")"
+        local xhttp_extra_uri
+        xhttp_extra_uri=$(url_encode "$XHTTP_EXTRA_JSON")
+        local link_xhttp="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&alpn=h2&fp=chrome&type=xhttp&host=${domain_argo}&path=%2Fxgo&mode=${XHTTP_MODE}&extra=${xhttp_extra_uri}#$(url_encode "$name_xhttp")"
         purple "${link_xhttp}"; echo ""; ((node_count++))
         
         local name_ws="${NODE_PREFIX} - WS"
