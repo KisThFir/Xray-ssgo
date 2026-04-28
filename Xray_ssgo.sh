@@ -95,7 +95,7 @@ XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPadding
 get_sys_info() {
     [ -n "$SYS_INFO_CACHE" ] && return
     local os_ver kernel_ver virt mem disk
-    
+
     if [ -f /etc/alpine-release ]; then
         read -r os_ver < /etc/alpine-release 2>/dev/null
         os_ver="Alpine ${os_ver}"
@@ -131,7 +131,6 @@ get_sys_info() {
     SYS_INFO_CACHE="${os_ver} | ${kernel_ver} | ${virt^^} | ${mem} | ${disk}"
 }
 
-# [修复] 双请求并行，加快检测速度
 check_system_ip() {
     [ "$IP_CHECKED" = "1" ] && return
     local DEFAULT_LOCAL_INTERFACE4=$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
@@ -225,7 +224,6 @@ check_status() {
     return 1
 }
 
-# [修复] 补充 coreutils 检测映射，避免每次都触发无效 apt-get update
 manage_packages() {
     local need_update=1
     for package in "$@"; do
@@ -236,7 +234,7 @@ manage_packages() {
             *)         cmd_check="$package" ;;
         esac
         command -v "$cmd_check" > /dev/null 2>&1 && continue
-        
+
         if [ "$need_update" -eq 1 ]; then
             if command -v apt-get > /dev/null 2>&1; then apt-get update -y >/dev/null 2>&1
             elif command -v apk > /dev/null 2>&1; then apk update >/dev/null 2>&1
@@ -266,6 +264,11 @@ EOF
     green "快捷方式已成功创建！随时输入 ssgo 即可云端秒加载最新版脚本！"
 }
 
+# DNS 配置：
+#   enableParallelQuery  —— 并发向所有 servers 发出请求，取最快返回（PR#5239）
+
+#   serveStale / serveExpiredTTL —— 缓存过期后立即返回旧记录并后台异步刷新（PR#5237）
+
 init_xray_config() {
     mkdir -p "${work_dir}"
     if [ ! -f "${config_dir}" ]; then
@@ -274,23 +277,25 @@ init_xray_config() {
   "log": { "access": "/dev/null", "error": "/dev/null", "loglevel": "none" },
   "dns": {
     "servers": [
-      {
-        "address": "https://1.1.1.1/dns-query",
-        "queryStrategy": "UseIPv4"
-      }
+      { "address": "https+local://1.1.1.1/dns-query", "queryStrategy": "UseIPv4" },
+      { "address": "https+local://8.8.8.8/dns-query",  "queryStrategy": "UseIPv4" }
     ],
-    "queryStrategy": "UseIPv4"
+    "queryStrategy": "UseIPv4",
+    "enableParallelQuery": true,
+    "disableFallback": true,
+    "serveStale": true,
+    "serveExpiredTTL": 0
   },
   "inbounds": [],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" },
-    { "protocol": "dns", "tag": "dns-out" }
+    { "protocol": "freedom",   "tag": "direct", "settings": { "domainStrategy": "UseIPv4" } },
+    { "protocol": "blackhole", "tag": "block"   },
+    { "protocol": "dns",       "tag": "dns-out" }
   ],
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
-      { "type": "field", "port": "53", "outboundTag": "dns-out" },
+      { "type": "field", "port": "53",      "outboundTag": "dns-out" },
       { "type": "field", "protocol": "dns", "outboundTag": "dns-out" }
     ]
   }
@@ -299,14 +304,9 @@ EOF
     fi
 }
 
+
 ensure_dns_routing() {
     init_xray_config
-
-    local has_dns
-    has_dns=$(jq 'has("dns")' "${config_dir}" 2>/dev/null)
-    if [ "$has_dns" != "true" ]; then
-        update_config '.dns = {"servers":[{"address":"https://1.1.1.1/dns-query","queryStrategy":"UseIPv4"}],"queryStrategy":"UseIPv4"}'
-    fi
 
     local has_dnsout
     has_dnsout=$(jq '[.outbounds[]?.tag] | contains(["dns-out"])' "${config_dir}" 2>/dev/null)
@@ -318,10 +318,15 @@ ensure_dns_routing() {
         update_config '.routing = {"domainStrategy":"AsIs","rules":[]}'
     fi
 
-    local has_port53
+    local has_port53 has_proto_dns
     has_port53=$(jq '[.routing.rules[]? | select(.port=="53")] | length' "${config_dir}" 2>/dev/null)
-    if [ "${has_port53:-0}" -eq 0 ]; then
-        update_config '.routing.rules += [{"type":"field","port":"53","outboundTag":"dns-out"},{"type":"field","protocol":"dns","outboundTag":"dns-out"}]'
+    has_proto_dns=$(jq '[.routing.rules[]? | select(.protocol=="dns")] | length' "${config_dir}" 2>/dev/null)
+    if [ "${has_port53:-0}" -eq 0 ] || [ "${has_proto_dns:-0}" -eq 0 ]; then
+        update_config 'del(.routing.rules[]? | select(.port=="53" or .protocol=="dns"))'
+        update_config '.routing.rules += [
+          {"type":"field","port":"53","outboundTag":"dns-out"},
+          {"type":"field","protocol":"dns","outboundTag":"dns-out"}
+        ]'
     fi
 }
 
@@ -331,9 +336,9 @@ install_core() {
         red "依赖组件 (jq/unzip) 安装失败，请检查 VPS 网络或软件源！"
         exit 1
     fi
-    
+
     mkdir -p "${work_dir}"
-    
+
     if [ ! -f "${work_dir}/${server_name}" ]; then
         purple "下载 Xray 内核..."
         local ARCH_RAW=$(uname -m); local ARCH_ARG
@@ -409,7 +414,7 @@ ask_freeflow_mode() {
     fi
 
     printf '%s\n%s\n' "${FREEFLOW_MODE}" "${FF_PATH}" > "${freeflow_conf}"
-    
+
     case "${FREEFLOW_MODE}" in
         ws) green "已选择：VLESS+WS (path=${FF_PATH})" ;;
         httpupgrade) green "已选择：VLESS+HTTP+ (path=${FF_PATH})" ;;
@@ -423,8 +428,7 @@ apply_freeflow_config() {
     local cur_uuid=$(get_current_uuid)
     update_config 'del(.inbounds[] | select(.port == 80))'
     if [ "${FREEFLOW_MODE}" != "none" ]; then
-        # [修复] destOverride 移除非法的 "dns"
-        local ff_json='{"port": 80, "listen": "::", "protocol": "vless", "settings": { "clients": [{ "id": "'${cur_uuid}'" }], "decryption": "none" }, "streamSettings": { "network": "'${FREEFLOW_MODE}'", "security": "none", "'${FREEFLOW_MODE}'Settings": { "path": "'${FF_PATH}'" } }, "sniffing": { "enabled": true, "destOverride": ["http","tls","quic"], "metadataOnly": false }}'
+        local ff_json='{"port":80,"listen":"::","protocol":"vless","settings":{"clients":[{"id":"'${cur_uuid}'"}],"decryption":"none"},"streamSettings":{"network":"'${FREEFLOW_MODE}'","security":"none","'${FREEFLOW_MODE}'Settings":{"path":"'${FF_PATH}'"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"metadataOnly":false}}'
         update_config --argjson ib "${ff_json}" '.inbounds += [$ib]'
     fi
 }
@@ -444,13 +448,13 @@ manage_freeflow() {
         printf "\033[1;32m 1.\033[0m \033[1;32m变更\033[0m方式    \033[1;32m 2.\033[0m \033[1;32m修改\033[0m路径\n"
         printf "\033[1;91m 3.\033[0m \033[1;91m卸载\033[0m模块    \033[1;35m 0.\033[0m \033[1;35m返回\033[0m主菜单\n"
         printf '%s\n' "==============================================="
-        
+
         clear_buffer
         prompt "请输入选择: " choice
 
         case "${choice}" in
             1) cls; ask_freeflow_mode; apply_freeflow_config; manage_service restart xray; green "FreeFlow 方式已变更"; get_info; pause ;;
-            2) 
+            2)
                 if [ "${FREEFLOW_MODE}" = "none" ]; then red "请先启用 FreeFlow！"; pause; continue; fi
                 cls; prompt "请输入新 path（回车保持当前 ${FF_PATH}）: " new_path
                 if [ -n "${new_path}" ]; then
@@ -472,7 +476,7 @@ manage_socks5() {
         cls; printf '\033[1;33m正在读取 Socks5 配置...\033[0m\n'
         ensure_dns_routing
         local socks_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
-        
+
         cls; printf '\033[1;35m                 管理 Socks5 代理              \033[0m\n'
         if [ -z "$socks_list" ]; then
             printf '  当前配置: \033[1;91m未配置\033[0m\n'
@@ -492,7 +496,7 @@ manage_socks5() {
         printf "\033[1;32m 1.\033[0m \033[1;32m添加\033[0m新端口  \033[1;32m 2.\033[0m \033[1;32m修改\033[0m配置\n"
         printf "\033[1;91m 3.\033[0m \033[1;91m删除\033[0m端口    \033[1;35m 0.\033[0m \033[1;35m返回\033[0m主菜单\n"
         printf '%s\n' "==============================================="
-        
+
         clear_buffer
         prompt "请输入选择: " s_choice
 
@@ -501,9 +505,8 @@ manage_socks5() {
                 cls; install_core
                 prompt "输入监听端口 (如 1080): " ns_port; prompt "输入用户名: " ns_user; prompt "输入密码: " ns_pass
                 if [[ -n "$ns_port" && "$ns_port" =~ ^[0-9]+$ && -n "$ns_user" && -n "$ns_pass" ]]; then
-                    # [修复] destOverride 移除非法的 "dns"
                     update_config --argjson p "$ns_port" --arg u "$ns_user" --arg pw "$ns_pass" \
-                        '.inbounds += [{"tag": ("socks-" + ($p|tostring)),"port": $p,"listen": "0.0.0.0","protocol": "socks","settings": { "auth": "password", "accounts": [{ "user": $u, "pass": $pw }], "udp": true }, "sniffing": {"enabled": true, "destOverride": ["http","tls"], "metadataOnly": false}}]'
+                        '.inbounds += [{"tag":("socks-"+($p|tostring)),"port":$p,"listen":"0.0.0.0","protocol":"socks","settings":{"auth":"password","accounts":[{"user":$u,"pass":$pw}],"udp":true},"sniffing":{"enabled":true,"destOverride":["http","tls"],"metadataOnly":false}}]'
                     green "添加成功！请确保服务器防火墙已放行 $ns_port 端口。"; manage_service restart xray
                 else
                     red "输入无效！端口必须为数字，且用户名和密码不能为空。"
@@ -512,7 +515,8 @@ manage_socks5() {
             2)
                 cls; prompt "请输入要修改的端口号: " edit_port; prompt "输入新用户名: " nu; prompt "输入新密码: " np
                 if [[ -n "$edit_port" && "$edit_port" =~ ^[0-9]+$ && -n "$nu" && -n "$np" ]]; then
-                    update_config --argjson p "$edit_port" --arg u "$nu" --arg pw "$np" '(.inbounds[] | select(.protocol=="socks" and .port==$p) | .settings.accounts[0]) |= {"user": $u, "pass": $pw}'
+                    update_config --argjson p "$edit_port" --arg u "$nu" --arg pw "$np" \
+                        '(.inbounds[] | select(.protocol=="socks" and .port==$p) | .settings.accounts[0]) |= {"user":$u,"pass":$pw}'
                     green "修改完成！"; manage_service restart xray
                 else
                     red "输入无效！"
@@ -559,19 +563,19 @@ install_argo_multiplex() {
     cls
     install_core
     ensure_dns_routing
-    
+
     echo ""; yellow "正在配置 Argo 路径分流 (WS + XHTTP + SS)"
-    skyblue "  => VLESS+WS 本地端口: 8080 (Cloudflare 云端路径: /argo)"
+    skyblue "  => VLESS+WS    本地端口: 8080 (Cloudflare 云端路径: /argo)"
     skyblue "  => VLESS+XHTTP 本地端口: 8081 (Cloudflare 云端路径: /xgo)"
-    skyblue "  => SS+WS 本地端口: 8082 (Cloudflare 云端路径: /ssgo)"
+    skyblue "  => SS+WS       本地端口: 8082 (Cloudflare 云端路径: /ssgo)"
     echo ""
-    
+
     prompt "请输入你的 Argo 域名: " argo_domain
     [ -z "$argo_domain" ] && red "Argo 域名不能为空" && return 1
 
     prompt "请输入 Argo 密钥 (提取到的 JSON 格式凭证): " argo_auth
     [ -z "$argo_auth" ] && red "密钥不能为空" && return 1
-    
+
     if ! echo "$argo_auth" | grep -q "TunnelSecret"; then
         red "错误：必须使用 JSON 格式的凭证！"
         return 1
@@ -592,7 +596,6 @@ install_argo_multiplex() {
     local tunnel_id=$(echo "$argo_auth" | jq -r '.TunnelID' 2>/dev/null || echo "$argo_auth" | cut -d'"' -f12)
     echo "$argo_auth" > "${work_dir}/tunnel_argo.json"
 
-    # 【强制 HTTP/2】
     cat > "${work_dir}/tunnel_argo.yml" << EOF
 tunnel: ${tunnel_id}
 credentials-file: ${work_dir}/tunnel_argo.json
@@ -617,53 +620,26 @@ ingress:
 EOF
 
     local cur_uuid=$(get_current_uuid)
-    
+
     update_config 'del(.inbounds[] | select(.port == 8080 or .port == 8081 or .port == 8082))'
-    
-    # [修复] destOverride 移除非法的 "dns"，保持其余原样
-    local ws_json='{"port": 8080, "listen": "127.0.0.1", "protocol": "vless", "settings": {"clients": [{"id": "'${cur_uuid}'"}], "decryption": "none"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/argo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
-    
+
+    local ws_json='{"port":8080,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":"'${cur_uuid}'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/argo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
+
     local xhttp_json
     xhttp_json=$(jq -nc \
         --arg uuid "$cur_uuid" \
         --arg mode "$XHTTP_MODE" \
         --argjson extra "$XHTTP_EXTRA_JSON" \
-        '{
-          "port": 8081,
-          "listen": "127.0.0.1",
-          "protocol": "vless",
-          "settings": {
-            "clients": [
-              { "id": $uuid }
-            ],
-            "decryption": "none"
-          },
-          "streamSettings": {
-            "network": "xhttp",
-            "security": "none",
-            "xhttpSettings": {
-              "host": "",
-              "path": "/xgo",
-              "mode": $mode,
-              "extra": $extra
-            }
-          },
-          "sniffing": {
-            "enabled": true,
-            "destOverride": ["http", "tls", "quic"],
-            "routeOnly": false
-          }
-        }')
+        '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}')
 
-    local ss_json='{"port": 8082, "listen": "127.0.0.1", "protocol": "shadowsocks", "settings": {"method": "'${ss_method}'", "password": "'${ss_pass}'", "network": "tcp,udp"}, "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/ssgo"}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false}}'
-    
+    local ss_json='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'${ss_method}'","password":"'${ss_pass}'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
+
     update_config --argjson ws "$ws_json" --argjson xhttp "$xhttp_json" --argjson ss "$ss_json" '.inbounds += [$ws, $xhttp, $ss]'
 
     local exec_cmd="${work_dir}/argo tunnel --edge-ip-version auto --no-autoupdate --config ${work_dir}/tunnel_argo.yml run"
     local svc_name="tunnel-argo"
 
     if [ -f /etc/alpine-release ]; then
-        # 用 wrapper 脚本规避 OpenRC command_args 引号嵌套风险
         cat > "${work_dir}/argo_start.sh" << EOF
 #!/bin/sh
 exec ${exec_cmd}
@@ -697,7 +673,7 @@ EOF
     manage_service enable ${svc_name}
     manage_service restart ${svc_name}
     manage_service restart xray
-    
+
     green "Argo(WS+XHTTP+SS) 隧道分流服务部署完毕！"
     get_info
 }
@@ -709,18 +685,18 @@ get_info() {
     [ -n "$WAN4" ] && IP="$WAN4" || { [ -n "$WAN6" ] && IP="[$WAN6]"; }
     local cur_uuid=$(get_current_uuid)
     local node_count=0
-    
+
     echo ""; green "=============== 当前可用节点链接 =============="
 
     if [ -f "${work_dir}/domain_argo.txt" ]; then
         local domain_argo=$(cat "${work_dir}/domain_argo.txt")
-        
+
         local name_xhttp="${NODE_PREFIX} - XHTTP"
         local xhttp_extra_uri
         xhttp_extra_uri=$(url_encode "$XHTTP_EXTRA_JSON")
         local link_xhttp="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&alpn=h2&fp=chrome&type=xhttp&host=${domain_argo}&path=%2Fxgo&mode=${XHTTP_MODE}&extra=${xhttp_extra_uri}#$(url_encode "$name_xhttp")"
         purple "${link_xhttp}"; echo ""; ((node_count++))
-        
+
         local name_ws="${NODE_PREFIX} - WS"
         local link_ws="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&fp=chrome&type=ws&host=${domain_argo}&path=%2Fargo%3Fed%3D2560#$(url_encode "$name_ws")"
         purple "${link_ws}"; echo ""; ((node_count++))
@@ -730,10 +706,8 @@ get_info() {
             local m=$(echo "$ss_ib" | jq -r '.settings.method')
             local pw=$(echo "$ss_ib" | jq -r '.settings.password')
             local name_ss="${NODE_PREFIX} - SS"
-            
             local b64=$(echo -n "${m}:${pw}" | base64 | tr -d '\n')
             local link_ss="ss://${b64}@${CFIP}:80?type=ws&security=none&host=${domain_argo}&path=%2Fssgo#$(url_encode "$name_ss")"
-            
             purple "${link_ss}"; echo ""; ((node_count++))
         fi
     fi
@@ -742,24 +716,25 @@ get_info() {
         local path_enc=$(printf '%s' "${FF_PATH}" | sed 's|%|%25|g; s| |%20|g')
         local ff_node_name="${FREEFLOW_MODE^^}"
         [ "$ff_node_name" = "HTTPUPGRADE" ] && ff_node_name="HTTP+"
-        
         local name_ff="${NODE_PREFIX} - FF-${ff_node_name}"
         local link="vless://${cur_uuid}@${IP}:80?encryption=none&security=none&type=${FREEFLOW_MODE}&host=${IP}&path=${path_enc}#$(url_encode "$name_ff")"
         purple "${link}"; echo ""; ((node_count++))
     fi
-    
+
     if [ -f "${config_dir}" ] && [ -n "$IP" ]; then
         local socks_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
         if [ -n "$socks_list" ]; then
             while read -r line; do
-                local p=$(echo "$line" | jq -r '.port'); local u=$(echo "$line" | jq -r '.settings.accounts[0].user'); local pw=$(echo "$line" | jq -r '.settings.accounts[0].pass')
+                local p=$(echo "$line" | jq -r '.port')
+                local u=$(echo "$line" | jq -r '.settings.accounts[0].user')
+                local pw=$(echo "$line" | jq -r '.settings.accounts[0].pass')
                 local name_socks="${NODE_PREFIX} - Socks5-${p}"
                 local link="socks5://${u}:${pw}@${IP}:${p}#$(url_encode "$name_socks")"
                 purple "${link}"; echo ""; ((node_count++))
             done <<< "$socks_list"
         fi
     fi
-    
+
     [ $node_count -eq 0 ] && yellow "当前没有任何节点配置。"
     printf '%s\n' "==============================================="
 }
@@ -779,22 +754,22 @@ manage_restart() {
             green "服务定时重启已关闭"
         else
             if ! command -v crontab >/dev/null 2>&1 || [ -f /etc/alpine-release ]; then
-                if command -v apt-get >/dev/null 2>&1; then 
+                if command -v apt-get >/dev/null 2>&1; then
                     manage_packages cron
                     manage_service enable cron 2>/dev/null; manage_service start cron 2>/dev/null
-                elif command -v apk >/dev/null 2>&1; then 
+                elif command -v apk >/dev/null 2>&1; then
                     manage_packages dcron
                     rc-service dcron start 2>/dev/null || true
                     rc-update add dcron default >/dev/null 2>&1 || true
-                else 
+                else
                     manage_packages cronie
                     manage_service enable crond 2>/dev/null; manage_service start crond 2>/dev/null
                 fi
             fi
-            
+
             local restart_cmd="systemctl restart xray tunnel-argo"
             [ -f /etc/alpine-release ] && restart_cmd="rc-service xray restart; rc-service tunnel-argo restart"
-            
+
             local cron_exp="*/${RESTART_INTERVAL} * * * *"
             if [ "${RESTART_INTERVAL}" -ge 60 ]; then
                 local hours=$(( RESTART_INTERVAL / 60 ))
@@ -810,7 +785,7 @@ manage_restart() {
 
 uninstall_component() {
     local target="$1"
-    
+
     if [ "$target" = "argo" ]; then
         manage_service stop tunnel-argo
         manage_service disable tunnel-argo
@@ -826,15 +801,15 @@ uninstall_component() {
         manage_service stop tunnel-argo
         manage_service disable tunnel-argo
         rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
-        
+
         manage_service stop xray
         manage_service disable xray
         rm -f /etc/init.d/xray /etc/systemd/system/xray.service
-        
+
         if command -v crontab >/dev/null 2>&1; then
             (crontab -l 2>/dev/null | sed '/#svc-restart/d') | crontab -
         fi
-        
+
         rm -rf "${work_dir}" /usr/bin/ssgo /usr/local/bin/ssgo
         green "所有组件及定时任务已彻底卸载完成！"
         exit 0
@@ -866,20 +841,20 @@ menu() {
 
         local x_stat=$(check_status "xray" "${work_dir}/${server_name}" "${work_dir}/xray")
         local argo_stat=$(check_status "tunnel-argo" "${work_dir}/argo" "${work_dir}/argo tunnel")
-        
+
         [ ! -f "${work_dir}/domain_argo.txt" ] && argo_stat="\033[1;91m未配置\033[0m"
 
         local len4=${#WAN4}
         local len6=${#WAN6}
         local pad_len=$(( len4 > len6 ? len4 : len6 ))
         [ -z "$pad_len" ] && pad_len=0
-        
+
         local ip4_disp="\033[1;91m未检出\033[0m"
         if [ -n "$WAN4" ]; then
             local pad_v4=$(printf "%-${pad_len}s" "$WAN4")
             ip4_disp="\033[1;36m${pad_v4}  (${COUNTRY4} ${AS_NUM4} ${ISP_CLEAN4})\033[0m"
         fi
-        
+
         local ip6_disp="\033[1;91m未检出\033[0m"
         if [ -n "$WAN6" ]; then
             local pad_v6=$(printf "%-${pad_len}s" "$WAN6")
