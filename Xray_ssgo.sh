@@ -264,11 +264,6 @@ EOF
     green "快捷方式已成功创建！随时输入 ssgo 即可云端秒加载最新版脚本！"
 }
 
-# DNS 配置：
-#   enableParallelQuery  —— 并发向所有 servers 发出请求，取最快返回（PR#5239）
-
-#   serveStale / serveExpiredTTL —— 缓存过期后立即返回旧记录并后台异步刷新（PR#5237）
-
 init_xray_config() {
     mkdir -p "${work_dir}"
     if [ ! -f "${config_dir}" ]; then
@@ -303,7 +298,6 @@ init_xray_config() {
 EOF
     fi
 }
-
 
 ensure_dns_routing() {
     init_xray_config
@@ -829,6 +823,83 @@ modify_uuid() {
     fi
 }
 
+check_and_add_swap() {
+    local TOTAL_RAM
+    TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
+    
+    if [ "$TOTAL_RAM" -le 70 ]; then
+        cls
+        echo -e "\033[33m警告: 检测到当前机器内存极小 (约 64MB 级别)。\033[0m"
+        echo -e "\033[33m运行 Xray 极易触发 OOM (内存溢出) 导致进程崩溃。\033[0m"
+        echo "强烈推荐添加 SWAP (虚拟内存) 以保证稳定运行。"
+        echo "------------------------------------------------------"
+        echo "请选择 SWAP 设置方案："
+        echo "  1. 添加 256MB SWAP (推荐，兼顾稳定与硬盘空间)"
+        echo "  2. 自定义 SWAP 大小"
+        echo "  0. 跳过不添加"
+        echo "------------------------------------------------------"
+        
+        read -p "请输入选项 [1/2/0] (默认 1): " swap_choice
+        swap_choice=${swap_choice:-1}
+        
+        local SWAP_SIZE=0
+        
+        case "$swap_choice" in
+            1)
+                SWAP_SIZE=256
+                ;;
+            2)
+                read -p "请输入您想要的 SWAP 大小 (单位: MB，例如 512): " custom_size
+                if [[ "$custom_size" =~ ^[0-9]+$ ]] && [ "$custom_size" -gt 0 ]; then
+                    SWAP_SIZE=$custom_size
+                else
+                    echo -e "\033[31m输入无效，请输入纯数字。已跳过 SWAP 设置。\033[0m"
+                fi
+                ;;
+            0)
+                echo "您选择了跳过。如果后续 Xray 无法启动，请务必考虑手动添加 SWAP 或限制 Xray 内存。"
+                ;;
+            *)
+                echo -e "\033[31m未知选项，已跳过 SWAP 设置。\033[0m"
+                ;;
+        esac
+
+        if [ "$SWAP_SIZE" -gt 0 ]; then
+            echo "正在为您创建 ${SWAP_SIZE}MB SWAP 空间..."
+            
+            if [ -f /swapfile ]; then
+                swapoff /swapfile >/dev/null 2>&1
+                rm -f /swapfile
+            fi
+
+            if fallocate -l ${SWAP_SIZE}M /swapfile 2>/dev/null; then
+                echo "存储空间分配完成。"
+            else
+                echo "正在使用 dd 命令分配空间，请稍候..."
+                dd if=/dev/zero of=/swapfile bs=1M count=${SWAP_SIZE} status=none
+            fi
+            
+            chmod 600 /swapfile
+            mkswap /swapfile >/dev/null 2>&1
+            swapon /swapfile >/dev/null 2>&1
+            
+            if swapon --show | grep -q "/swapfile"; then
+                echo -e "\033[32m${SWAP_SIZE}MB SWAP 添加并启用成功！\033[0m"
+                if ! grep -q "/swapfile" /etc/fstab; then
+                    echo "/swapfile none swap sw 0 0" >> /etc/fstab
+                fi
+            else
+                echo -e "\033[31mSWAP 启用失败！\033[0m"
+                echo -e "\033[33m原因通常是您的 VPS 虚拟化架构 (如 OVZ/LXC) 在母鸡层面限制了 SWAP 权限。\033[0m"
+                echo "建议后续通过修改 Xray 服务的 GOMEMLIMIT 环境变量来强行限制内存。"
+                rm -f /swapfile
+                echo "已自动清理无效的 swapfile 文件。"
+            fi
+            pause
+        fi
+    fi
+}
+
 trap 'echo ""; cls; red "已中断"; exit 130' INT TERM
 
 menu() {
@@ -896,4 +967,5 @@ v6: ${ip6_disp}
     done
 }
 
+check_and_add_swap
 menu
