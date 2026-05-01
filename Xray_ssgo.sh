@@ -324,34 +324,95 @@ ensure_dns_routing() {
     fi
 }
 
+# --- 核心下载组件：智能全速/限速降级重试机制 (统一内存检测逻辑) ---
+smart_download() {
+    local target_file="$1"
+    local url="$2"
+    local min_size_bytes="$3"
+    local max_retries=3
+    local retry_count=0
+    local dl_success=0
+
+    # 统一使用从 /proc/meminfo 精确读取的物理内存值
+    local total_ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+    local use_slow_mode=0
+
+    # 如果检测到确实是极小内存，直接上安全模式
+    if [ -n "$total_ram" ] && [ "$total_ram" -le 75 ]; then
+        use_slow_mode=1
+    fi
+
+    while [ $retry_count -lt $max_retries ]; do
+        rm -f "${target_file}"
+        
+        if [ "$use_slow_mode" -eq 1 ]; then
+            yellow "正在安全下载 (尝试 $((retry_count + 1))/${max_retries})，启用 2M/s 限速防 OOM..."
+            wget -q --show-progress --limit-rate=2M --timeout=30 -O "${target_file}" "${url}"
+        else
+            purple "正在全速下载 (尝试 $((retry_count + 1))/${max_retries})..."
+            wget -q --show-progress --timeout=30 -O "${target_file}" "${url}"
+        fi
+
+        # 校验文件存在及大小
+        if [ -f "${target_file}" ]; then
+            local file_size=$(wc -c < "${target_file}" 2>/dev/null || stat -c%s "${target_file}" 2>/dev/null)
+            if [ -n "$file_size" ] && [ "$file_size" -ge "$min_size_bytes" ]; then
+                green "下载并校验成功 (${file_size} bytes)"
+                dl_success=1
+                break
+            else
+                red "下载失败: 文件体积异常或残缺 (${file_size} bytes，正常应 >= ${min_size_bytes} bytes)。"
+                # 触发降级机制：如果全速失败，极有可能是容器虚假内存导致被 OOM，强制降级
+                if [ "$use_slow_mode" -eq 0 ]; then
+                    yellow "疑似触发母鸡 OOM 限制，自动降级为【限速安全模式】重试！"
+                    use_slow_mode=1
+                fi
+            fi
+        else
+            red "下载失败: 未生成目标文件。"
+            if [ "$use_slow_mode" -eq 0 ]; then
+                yellow "网络或内存异常，自动降级为【限速安全模式】重试！"
+                use_slow_mode=1
+            fi
+        fi
+
+        retry_count=$((retry_count + 1))
+        [ $retry_count -lt $max_retries ] && sleep 3
+    done
+
+    if [ $dl_success -eq 0 ]; then
+        red "严重错误: ${target_file} 经过 3 次重试仍下载失败。"
+        red "已自动终止执行，防止生成错误的残缺节点！请检查网络后重试。"
+        exit 1
+    fi
+}
+
 install_core() {
-    manage_packages jq unzip curl iproute2 coreutils
-    if ! command -v jq >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
-        red "依赖组件 (jq/unzip) 安装失败，请检查 VPS 网络或软件源！"
+    manage_packages jq unzip wget iproute2 coreutils
+    if ! command -v jq >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1 || ! command -v wget >/dev/null 2>&1; then
+        red "依赖组件 (jq/unzip/wget) 安装失败，请检查 VPS 网络或软件源！"
         exit 1
     fi
 
     mkdir -p "${work_dir}"
 
     if [ ! -f "${work_dir}/${server_name}" ]; then
-        purple "下载 Xray 内核..."
+        echo ""
+        purple "=== 准备部署 Xray 内核 ==="
         local ARCH_RAW=$(uname -m); local ARCH_ARG
         case "${ARCH_RAW}" in
             'x86_64') ARCH_ARG='64' ;;
             'aarch64'|'arm64') ARCH_ARG='arm64-v8a' ;;
             *) ARCH_ARG='32' ;;
         esac
-        curl -sLo "${work_dir}/xray.zip" "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCH_ARG}.zip"
+        local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCH_ARG}.zip"
+        
+        # 调用智能下载，要求 xray.zip 至少 5MB
+        smart_download "${work_dir}/xray.zip" "${xray_url}" 5000000
+        
         unzip -o "${work_dir}/xray.zip" -d "${work_dir}/" > /dev/null 2>&1
         chmod +x "${work_dir}/${server_name}"
         rm -f "${work_dir}/xray.zip" "${work_dir}/geosite.dat" "${work_dir}/geoip.dat" "${work_dir}/README.md" "${work_dir}/LICENSE"
-    fi
-
-    if [ ! -f "${work_dir}/argo" ]; then
-        purple "下载 Cloudflared..."
-        local ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
-        curl -sLo "${work_dir}/argo" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
-        chmod +x "${work_dir}/argo"
     fi
 
     if [ ! -f /etc/systemd/system/xray.service ] && ! [ -f /etc/init.d/xray ]; then
@@ -373,6 +434,9 @@ After=network.target
 [Service]
 ExecStart=${work_dir}/xray run -c ${config_dir}
 Restart=always
+# 为极限小鸡加入的 Go 语言软限制，正常机器无负面影响
+Environment="GOGC=20"
+Environment="GOMEMLIMIT=40MiB"
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -556,6 +620,18 @@ manage_socks5() {
 install_argo_multiplex() {
     cls
     install_core
+    
+    if [ ! -f "${work_dir}/argo" ]; then
+        echo ""
+        purple "=== 准备部署 Cloudflared ==="
+        local ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+        local argo_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
+        
+        # 调用智能下载，要求 argo 至少 15MB
+        smart_download "${work_dir}/argo" "${argo_url}" 15000000
+        chmod +x "${work_dir}/argo"
+    fi
+    
     ensure_dns_routing
 
     echo ""; yellow "正在配置 Argo 路径分流 (WS + XHTTP + SS)"
@@ -826,8 +902,12 @@ modify_uuid() {
 manage_swap() {
     while true; do
         cls
-        local TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
-        local TOTAL_SWAP=$(free -m | awk '/^Swap:/{print $2}')
+        # 统一使用从 /proc/meminfo 精确读取的数值
+        local TOTAL_RAM=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+        local TOTAL_SWAP=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+        
+        [ -z "$TOTAL_RAM" ] && TOTAL_RAM=0
+        [ -z "$TOTAL_SWAP" ] && TOTAL_SWAP=0
         
         echo -e "\033[1;36m=============== SWAP 虚拟内存管理 ===============\033[0m"
         echo -e "物理内存 (RAM): ${TOTAL_RAM} MB"
