@@ -324,7 +324,6 @@ ensure_dns_routing() {
     fi
 }
 
-# --- 核心下载组件：智能全速/限速降级重试机制 (统一内存检测逻辑) ---
 smart_download() {
     local target_file="$1"
     local url="$2"
@@ -333,11 +332,9 @@ smart_download() {
     local retry_count=0
     local dl_success=0
 
-    # 统一使用从 /proc/meminfo 精确读取的物理内存值
     local total_ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
     local use_slow_mode=0
 
-    # 如果检测到确实是极小内存，直接上安全模式
     if [ -n "$total_ram" ] && [ "$total_ram" -le 75 ]; then
         use_slow_mode=1
     fi
@@ -353,7 +350,6 @@ smart_download() {
             wget -q --show-progress --timeout=30 -O "${target_file}" "${url}"
         fi
 
-        # 校验文件存在及大小
         if [ -f "${target_file}" ]; then
             local file_size=$(wc -c < "${target_file}" 2>/dev/null || stat -c%s "${target_file}" 2>/dev/null)
             if [ -n "$file_size" ] && [ "$file_size" -ge "$min_size_bytes" ]; then
@@ -361,17 +357,16 @@ smart_download() {
                 dl_success=1
                 break
             else
-                red "下载失败: 文件体积异常或残缺 (${file_size} bytes，正常应 >= ${min_size_bytes} bytes)。"
-                # 触发降级机制：如果全速失败，极有可能是容器虚假内存导致被 OOM，强制降级
+                red "下载失败: 文件体积异常或残缺 (${file_size} bytes)。"
                 if [ "$use_slow_mode" -eq 0 ]; then
-                    yellow "疑似触发母鸡 OOM 限制，自动降级为【限速安全模式】重试！"
+                    yellow "自动降级为【限速安全模式】重试！"
                     use_slow_mode=1
                 fi
             fi
         else
             red "下载失败: 未生成目标文件。"
             if [ "$use_slow_mode" -eq 0 ]; then
-                yellow "网络或内存异常，自动降级为【限速安全模式】重试！"
+                yellow "自动降级为【限速安全模式】重试！"
                 use_slow_mode=1
             fi
         fi
@@ -382,15 +377,14 @@ smart_download() {
 
     if [ $dl_success -eq 0 ]; then
         red "严重错误: ${target_file} 经过 3 次重试仍下载失败。"
-        red "已自动终止执行，防止生成错误的残缺节点！请检查网络后重试。"
         exit 1
     fi
 }
 
 install_core() {
-    manage_packages jq unzip wget iproute2 coreutils
-    if ! command -v jq >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1 || ! command -v wget >/dev/null 2>&1; then
-        red "依赖组件 (jq/unzip/wget) 安装失败，请检查 VPS 网络或软件源！"
+    manage_packages jq unzip wget iproute2 coreutils tar
+    if ! command -v jq >/dev/null 2>&1 || ! command -v wget >/dev/null 2>&1; then
+        red "依赖组件安装失败，请检查网络！"
         exit 1
     fi
 
@@ -407,9 +401,7 @@ install_core() {
         esac
         local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCH_ARG}.zip"
         
-        # 调用智能下载，要求 xray.zip 至少 5MB
         smart_download "${work_dir}/xray.zip" "${xray_url}" 5000000
-        
         unzip -o "${work_dir}/xray.zip" -d "${work_dir}/" > /dev/null 2>&1
         chmod +x "${work_dir}/${server_name}"
         rm -f "${work_dir}/xray.zip" "${work_dir}/geosite.dat" "${work_dir}/geoip.dat" "${work_dir}/README.md" "${work_dir}/LICENSE"
@@ -434,7 +426,6 @@ After=network.target
 [Service]
 ExecStart=${work_dir}/xray run -c ${config_dir}
 Restart=always
-# 为极限小鸡加入的 Go 语言软限制，正常机器无负面影响
 Environment="GOGC=20"
 Environment="GOMEMLIMIT=40MiB"
 [Install]
@@ -627,7 +618,6 @@ install_argo_multiplex() {
         local ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
         local argo_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
         
-        # 调用智能下载，要求 argo 至少 15MB
         smart_download "${work_dir}/argo" "${argo_url}" 15000000
         chmod +x "${work_dir}/argo"
     fi
@@ -748,6 +738,148 @@ EOF
     get_info
 }
 
+# --- 新增的 Nano 极限版安装模块 (SS-Rust + v2ray-plugin) ---
+install_argo_nano() {
+    cls
+    echo ""; purple "=== 准备部署极限轻量版 SS-Rust + Argo ==="
+    manage_packages jq unzip wget iproute2 coreutils tar
+    if command -v apt-get >/dev/null 2>&1; then
+        manage_packages xz-utils
+    else
+        manage_packages xz
+    fi
+
+    mkdir -p /etc/ss-rust
+    mkdir -p "${work_dir}"
+
+    local ARCH_RAW=$(uname -m)
+    local SS_ARCH=""
+    local V2_ARCH=""
+    case "${ARCH_RAW}" in
+        'x86_64') SS_ARCH="x86_64-unknown-linux-musl"; V2_ARCH="amd64" ;;
+        'aarch64'|'arm64') SS_ARCH="aarch64-unknown-linux-musl"; V2_ARCH="arm64" ;;
+        *) red "不支持的架构: ${ARCH_RAW}"; pause; return 1 ;;
+    esac
+
+    local SS_VER="v1.18.2"
+    local SS_URL="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${SS_VER}/shadowsocks-${SS_VER}.${SS_ARCH}.tar.xz"
+    local V2_URL="https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.3.2/v2ray-plugin-linux-${V2_ARCH}-v1.3.2.tar.gz"
+
+    if [ ! -f "/etc/ss-rust/ssserver" ]; then
+        smart_download "/etc/ss-rust/ss.tar.xz" "${SS_URL}" 2000000
+        tar -xf "/etc/ss-rust/ss.tar.xz" -C /etc/ss-rust/
+        rm -f /etc/ss-rust/ss.tar.xz /etc/ss-rust/sslocal /etc/ss-rust/ssmanager /etc/ss-rust/ssservice
+        chmod +x /etc/ss-rust/ssserver
+    fi
+
+    if [ ! -f "/etc/ss-rust/v2ray-plugin" ]; then
+        smart_download "/etc/ss-rust/v2.tar.gz" "${V2_URL}" 3000000
+        tar -xzf "/etc/ss-rust/v2.tar.gz" -C /etc/ss-rust/
+        mv /etc/ss-rust/v2ray-plugin* /etc/ss-rust/v2ray-plugin 2>/dev/null
+        chmod +x /etc/ss-rust/v2ray-plugin
+    fi
+
+    if [ ! -f "${work_dir}/argo" ]; then
+        local ARGO_ARCH=$(echo "$ARCH_RAW" | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+        local ARGO_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARGO_ARCH}"
+        smart_download "${work_dir}/argo" "${ARGO_URL}" 15000000
+        chmod +x "${work_dir}/argo"
+    fi
+
+    echo ""; yellow "正在配置 Argo 路径分流 (仅纯净 SS-Rust+WS)"
+    skyblue "  => SS-Rust+WS  本地端口: 8082 (Cloudflare 云端路径: /ssgo)"
+    echo ""
+
+    prompt "请输入你的 Argo 域名: " argo_domain
+    [ -z "$argo_domain" ] && red "Argo 域名不能为空" && return 1
+
+    prompt "请输入 Argo 密钥 (提取到的 JSON 格式凭证): " argo_auth
+    [ -z "$argo_auth" ] && red "密钥不能为空" && return 1
+
+    if ! echo "$argo_auth" | grep -q "TunnelSecret"; then
+        red "错误：必须使用 JSON 格式的凭证！"
+        return 1
+    fi
+
+    echo ""; green "------------- SS+WS 节点参数设置 --------------"
+    prompt "请输入 SS 密码 (回车默认随机): " ss_pass
+    [ -z "$ss_pass" ] && ss_pass=$(generate_uuid | cut -c 1-8)
+
+    echo "选择 SS 加密方式:"
+    echo "  1. aes-128-gcm (默认，最省资源)"
+    echo "  2. aes-256-gcm"
+    prompt "请输入(1-2，回车默认1): " m_choice
+    local ss_method="aes-128-gcm"
+    [ "$m_choice" = "2" ] && ss_method="aes-256-gcm"
+
+    # 写入 Nano 专属配置文件
+    echo "${argo_domain}|${ss_method}|${ss_pass}" > /etc/ss-rust/nano.conf
+
+    echo "$argo_domain" > "${work_dir}/domain_argo.txt"
+    local tunnel_id=$(echo "$argo_auth" | jq -r '.TunnelID' 2>/dev/null || echo "$argo_auth" | cut -d'"' -f12)
+    echo "$argo_auth" > "${work_dir}/tunnel_argo.json"
+
+    cat > "${work_dir}/tunnel_argo.yml" << EOF
+tunnel: ${tunnel_id}
+credentials-file: ${work_dir}/tunnel_argo.json
+protocol: http2
+ingress:
+  - hostname: ${argo_domain}
+    path: /ssgo
+    service: http://localhost:8082
+    originRequest:
+      noTLSVerify: true
+  - service: http_status:404
+EOF
+
+    if [ ! -f /etc/systemd/system/ss-rust.service ]; then
+        cat > /etc/systemd/system/ss-rust.service << EOF
+[Unit]
+Description=Shadowsocks-Rust Nano
+After=network.target
+[Service]
+Type=simple
+User=root
+ExecStart=/etc/ss-rust/ssserver -s "127.0.0.1:8082" -m "${ss_method}" -k "${ss_pass}" --plugin /etc/ss-rust/v2ray-plugin --plugin-opts "server;path=/ssgo"
+Restart=always
+RestartSec=5s
+Environment="GOGC=20"
+Environment="GOMEMLIMIT=20MiB"
+[Install]
+WantedBy=multi-user.target
+EOF
+        manage_service enable ss-rust
+    else
+        sed -i "s|ExecStart=.*|ExecStart=/etc/ss-rust/ssserver -s \"127.0.0.1:8082\" -m \"${ss_method}\" -k \"${ss_pass}\" --plugin /etc/ss-rust/v2ray-plugin --plugin-opts \"server;path=/ssgo\"|g" /etc/systemd/system/ss-rust.service
+        systemctl daemon-reload
+    fi
+
+    local exec_cmd="${work_dir}/argo tunnel --edge-ip-version auto --no-autoupdate --config ${work_dir}/tunnel_argo.yml run"
+    local svc_name="tunnel-argo"
+    cat > /etc/systemd/system/${svc_name}.service << EOF
+[Unit]
+Description=Cloudflare Tunnel Multiplex
+After=network.target
+[Service]
+Type=simple
+NoNewPrivileges=yes
+ExecStart=${exec_cmd}
+Restart=always
+RestartSec=5s
+[Install]
+WantedBy=multi-user.target
+EOF
+    manage_service enable ${svc_name}
+    
+    manage_service stop xray 2>/dev/null
+    
+    manage_service restart ss-rust
+    manage_service restart ${svc_name}
+
+    green "极限版 SS-Rust + Argo 隧道分流服务部署完毕！"
+    get_info
+}
+
 get_info() {
     cls
     check_system_ip
@@ -758,7 +890,7 @@ get_info() {
 
     echo ""; green "=============== 当前可用节点链接 =============="
 
-    if [ -f "${work_dir}/domain_argo.txt" ]; then
+    if [ -f "${work_dir}/domain_argo.txt" ] && is_service_running "xray"; then
         local domain_argo=$(cat "${work_dir}/domain_argo.txt")
 
         local name_xhttp="${NODE_PREFIX} - XHTTP"
@@ -775,11 +907,19 @@ get_info() {
         if [ -n "$ss_ib" ]; then
             local m=$(echo "$ss_ib" | jq -r '.settings.method')
             local pw=$(echo "$ss_ib" | jq -r '.settings.password')
-            local name_ss="${NODE_PREFIX} - SS"
+            local name_ss="${NODE_PREFIX} - SS-Xray"
             local b64=$(echo -n "${m}:${pw}" | base64 | tr -d '\n')
             local link_ss="ss://${b64}@${CFIP}:80?type=ws&security=none&host=${domain_argo}&path=%2Fssgo#$(url_encode "$name_ss")"
             purple "${link_ss}"; echo ""; ((node_count++))
         fi
+    fi
+
+    if [ -f "/etc/ss-rust/nano.conf" ] && is_service_running "ss-rust"; then
+        IFS='|' read -r r_dom r_meth r_pass < "/etc/ss-rust/nano.conf"
+        local b64=$(echo -n "${r_meth}:${r_pass}" | base64 | tr -d '\n')
+        local name_ss="${NODE_PREFIX} - Nano-SS"
+        local link_ss="ss://${b64}@${CFIP}:80?type=ws&security=none&host=${r_dom}&path=%2Fssgo#$(url_encode "$name_ss")"
+        purple "${link_ss}"; echo ""; ((node_count++))
     fi
 
     if [ "${FREEFLOW_MODE}" != "none" ] && [ -n "$IP" ]; then
@@ -791,7 +931,7 @@ get_info() {
         purple "${link}"; echo ""; ((node_count++))
     fi
 
-    if [ -f "${config_dir}" ] && [ -n "$IP" ]; then
+    if [ -f "${config_dir}" ] && [ -n "$IP" ] && is_service_running "xray"; then
         local socks_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
         if [ -n "$socks_list" ]; then
             while read -r line; do
@@ -805,7 +945,7 @@ get_info() {
         fi
     fi
 
-    [ $node_count -eq 0 ] && yellow "当前没有任何节点配置。"
+    [ $node_count -eq 0 ] && yellow "当前没有任何活跃的节点配置。"
     printf '%s\n' "==============================================="
 }
 
@@ -837,7 +977,7 @@ manage_restart() {
                 fi
             fi
 
-            local restart_cmd="systemctl restart xray tunnel-argo"
+            local restart_cmd="systemctl restart xray tunnel-argo ss-rust"
             [ -f /etc/alpine-release ] && restart_cmd="rc-service xray restart; rc-service tunnel-argo restart"
 
             local cron_exp="*/${RESTART_INTERVAL} * * * *"
@@ -857,30 +997,40 @@ uninstall_component() {
     local target="$1"
 
     if [ "$target" = "argo" ]; then
-        manage_service stop tunnel-argo
-        manage_service disable tunnel-argo
+        manage_service stop tunnel-argo 2>/dev/null
+        manage_service disable tunnel-argo 2>/dev/null
         rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
         rm -f "${work_dir}/domain_argo.txt" "${work_dir}/tunnel_argo.yml" "${work_dir}/tunnel_argo.json"
         rm -f "${work_dir}/argo_start.sh" "${work_dir}/argo_dual.log"
         [ -f "${config_dir}" ] && update_config 'del(.inbounds[] | select(.port == 8080 or .port == 8081 or .port == 8082))'
-        green "Argo (WS+XHTTP+SS) 已卸载关闭！"
-        manage_service restart xray
+        
+        manage_service stop ss-rust 2>/dev/null
+        manage_service disable ss-rust 2>/dev/null
+        rm -f /etc/systemd/system/ss-rust.service
+        rm -rf /etc/ss-rust
+        
+        green "Argo 及关联隧道配置已卸载关闭！"
+        is_service_running "xray" && manage_service restart xray
     fi
 
     if [ "$target" = "all" ]; then
-        manage_service stop tunnel-argo
-        manage_service disable tunnel-argo
+        manage_service stop tunnel-argo 2>/dev/null
+        manage_service disable tunnel-argo 2>/dev/null
         rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
 
-        manage_service stop xray
-        manage_service disable xray
+        manage_service stop xray 2>/dev/null
+        manage_service disable xray 2>/dev/null
         rm -f /etc/init.d/xray /etc/systemd/system/xray.service
+        
+        manage_service stop ss-rust 2>/dev/null
+        manage_service disable ss-rust 2>/dev/null
+        rm -f /etc/systemd/system/ss-rust.service
 
         if command -v crontab >/dev/null 2>&1; then
             (crontab -l 2>/dev/null | sed '/#svc-restart/d') | crontab -
         fi
 
-        rm -rf "${work_dir}" /usr/bin/ssgo /usr/local/bin/ssgo
+        rm -rf "${work_dir}" /etc/ss-rust /usr/bin/ssgo /usr/local/bin/ssgo
         green "所有组件及定时任务已彻底卸载完成！"
         exit 0
     fi
@@ -895,14 +1045,14 @@ modify_uuid() {
         echo ""
         get_info
     else
-        yellow "配置文件不存在，请先安装节点"
+        yellow "Xray 配置文件不存在，请先安装节点"
     fi
 }
 
+# --- 核心修改：抛弃 fallocate，采用纯 dd 物理 0 填充的高兼容模式 ---
 manage_swap() {
     while true; do
         cls
-        # 统一使用从 /proc/meminfo 精确读取的数值
         local TOTAL_RAM=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
         local TOTAL_SWAP=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
         
@@ -917,7 +1067,7 @@ manage_swap() {
             echo -e "虚拟内存 (SWAP): \033[1;91m0 MB (未开启)\033[0m"
         fi
         echo "-----------------------------------------------"
-        echo -e "\033[1;32m 1.\033[0m 添加 / 修改 SWAP"
+        echo -e "\033[1;32m 1.\033[0m 添加 / 修改 SWAP (纯 dd 兼容模式)"
         echo -e "\033[1;91m 2.\033[0m 关闭并清理 SWAP"
         echo -e "\033[1;35m 0.\033[0m 返回主菜单"
         echo "==============================================="
@@ -938,11 +1088,14 @@ manage_swap() {
                     fi
                     [ -f /swapfile ] && rm -f /swapfile
                     
-                    if fallocate -l ${swap_size}M /swapfile 2>/dev/null; then
-                        green "空间分配成功 (fallocate)。"
+                    yellow "正在使用 dd 命令分配物理空间 (最高兼容性)，这可能需要一些时间，请耐心等待..."
+                    if dd if=/dev/zero of=/swapfile bs=1M count=${swap_size} status=none; then
+                        green "空间分配成功！"
                     else
-                        yellow "fallocate 失败，尝试使用 dd 命令分配空间，这可能需要一些时间..."
-                        dd if=/dev/zero of=/swapfile bs=1M count=${swap_size} status=none
+                        red "空间分配失败！可能是硬盘空间不足。"
+                        rm -f /swapfile
+                        pause
+                        continue
                     fi
                     
                     chmod 600 /swapfile
@@ -955,7 +1108,7 @@ manage_swap() {
                             echo "/swapfile none swap sw 0 0" >> /etc/fstab
                         fi
                     else
-                        red "SWAP 启用失败！这通常是因为您的 VPS 虚拟化架构 (如部分 OVZ/LXC) 在母鸡层面限制了 SWAP 权限。"
+                        red "SWAP 启用失败！这通常是因为您的 VPS 虚拟化架构 (如 LXC/OpenVZ) 在母鸡层面限制了 swapon 权限。"
                         rm -f /swapfile
                     fi
                 else
@@ -999,9 +1152,13 @@ menu() {
         cls; printf '\033[1;33m正在刷新系统状态...\033[0m\n'
 
         local x_stat=$(check_status "xray" "${work_dir}/${server_name}" "${work_dir}/xray")
+        local ss_stat=$(check_status "ss-rust" "/etc/ss-rust/ssserver" "/etc/ss-rust/ssserver")
         local argo_stat=$(check_status "tunnel-argo" "${work_dir}/argo" "${work_dir}/argo tunnel")
 
         [ ! -f "${work_dir}/domain_argo.txt" ] && argo_stat="\033[1;91m未配置\033[0m"
+
+        local core_display="${x_stat}"
+        [ -f "/etc/ss-rust/ssserver" ] && is_service_running "ss-rust" && core_display="${ss_stat} (SS-Rust)"
 
         local len4=${#WAN4}
         local len6=${#WAN6}
@@ -1024,15 +1181,16 @@ menu() {
 v4: ${ip4_disp}
 v6: ${ip6_disp}
 -----------------------------------------------
-  Xray: ${x_stat}    |    Argo: ${argo_stat}
+  Core: ${core_display}  |  Argo: ${argo_stat}
 -----------------------------------------------
-\033[1;32m 1.\033[0m 安装\033[1;36mArgo\033[0m
-\033[1;91m 2.\033[0m \033[1;91m卸载\033[0m\033[1;36mArgo\033[0m
-\033[1;32m 3.\033[0m 管理\033[1;33mS5\033[0m        \033[1;32m 4.\033[0m 管理\033[1;33mFF\033[0m
-\033[1;32m 5.\033[0m 查看\033[1;36m节点\033[0m      \033[1;32m 6.\033[0m 修改\033[1;36mUUID\033[0m
-\033[1;32m 7.\033[0m 定时\033[1;33m重启\033[0m      \033[1;32m 8.\033[0m 创建\033[1;33m快捷\033[0m
-\033[1;32m 9.\033[0m 管理\033[1;36mSWAP\033[0m      \033[1;91m10.\033[0m 彻底\033[1;91m卸载\033[0m
-\033[1;35m 0.\033[0m 安全\033[1;35m退出\033[0m
+\033[1;32m 1.\033[0m 安装 Argo \033[1;36m(Xray常规版)\033[0m
+\033[1;32m 2.\033[0m 安装 Argo \033[1;36m(Nano极限版 SS-Rust，针对64M小鸡)\033[0m
+\033[1;91m 3.\033[0m \033[1;91m卸载\033[0m Argo 分流
+-----------------------------------------------
+\033[1;32m 4.\033[0m 管理\033[1;33mS5\033[0m        \033[1;32m 5.\033[0m 管理\033[1;33mFF\033[0m
+\033[1;32m 6.\033[0m 查看\033[1;36m节点\033[0m      \033[1;32m 7.\033[0m 修改\033[1;36mUUID\033[0m (仅Xray)
+\033[1;32m 8.\033[0m 定时\033[1;33m重启\033[0m      \033[1;32m 9.\033[0m 管理\033[1;36mSWAP\033[0m
+\033[1;91m10.\033[0m 彻底\033[1;91m卸载\033[0m      \033[1;35m 0.\033[0m 安全\033[1;35m退出\033[0m
 ==============================================="
 
         cls; printf '%b\n' "$menu_text"
@@ -1042,13 +1200,13 @@ v6: ${ip6_disp}
 
         case "${choice}" in
             1) cls; install_argo_multiplex; pause ;;
-            2) cls; uninstall_component "argo"; pause ;;
-            3) manage_socks5 ;;
-            4) manage_freeflow ;;
-            5) cls; get_info; pause ;;
-            6) cls; modify_uuid; pause ;;
-            7) manage_restart; pause ;;
-            8) cls; install_shortcut; pause ;;
+            2) install_argo_nano; pause ;;
+            3) cls; uninstall_component "argo"; pause ;;
+            4) manage_socks5 ;;
+            5) manage_freeflow ;;
+            6) cls; get_info; pause ;;
+            7) cls; modify_uuid; pause ;;
+            8) manage_restart; pause ;;
             9) manage_swap ;;
             10) cls; uninstall_component "all" ;;
             0) cls; exit 0 ;;
