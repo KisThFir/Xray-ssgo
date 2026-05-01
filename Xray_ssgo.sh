@@ -823,81 +823,89 @@ modify_uuid() {
     fi
 }
 
-check_and_add_swap() {
-    local TOTAL_RAM
-    TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
-    
-    if [ "$TOTAL_RAM" -le 70 ]; then
+manage_swap() {
+    while true; do
         cls
-        echo -e "\033[33m警告: 检测到当前机器内存极小 (约 64MB 级别)。\033[0m"
-        echo -e "\033[33m运行 Xray 极易触发 OOM (内存溢出) 导致进程崩溃。\033[0m"
-        echo "强烈推荐添加 SWAP (虚拟内存) 以保证稳定运行。"
-        echo "------------------------------------------------------"
-        echo "请选择 SWAP 设置方案："
-        echo "  1. 添加 256MB SWAP (推荐，兼顾稳定与硬盘空间)"
-        echo "  2. 自定义 SWAP 大小"
-        echo "  0. 跳过不添加"
-        echo "------------------------------------------------------"
+        local TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
+        local TOTAL_SWAP=$(free -m | awk '/^Swap:/{print $2}')
         
-        read -p "请输入选项 [1/2/0] (默认 1): " swap_choice
-        swap_choice=${swap_choice:-1}
+        echo -e "\033[1;36m=============== SWAP 虚拟内存管理 ===============\033[0m"
+        echo -e "物理内存 (RAM): ${TOTAL_RAM} MB"
+        if [ "$TOTAL_SWAP" -gt 0 ]; then
+            echo -e "虚拟内存 (SWAP): \033[1;32m${TOTAL_SWAP} MB (已开启)\033[0m"
+        else
+            echo -e "虚拟内存 (SWAP): \033[1;91m0 MB (未开启)\033[0m"
+        fi
+        echo "-----------------------------------------------"
+        echo -e "\033[1;32m 1.\033[0m 添加 / 修改 SWAP"
+        echo -e "\033[1;91m 2.\033[0m 关闭并清理 SWAP"
+        echo -e "\033[1;35m 0.\033[0m 返回主菜单"
+        echo "==============================================="
         
-        local SWAP_SIZE=0
+        prompt "请输入选择 [0-2]: " swap_opt
         
-        case "$swap_choice" in
+        case "${swap_opt}" in
             1)
-                SWAP_SIZE=256
+                echo ""
+                prompt "请输入您想要设置的 SWAP 大小(MB) [推荐 256，回车默认 256]: " swap_size
+                swap_size=${swap_size:-256}
+                
+                if [[ "$swap_size" =~ ^[0-9]+$ ]] && [ "$swap_size" -gt 0 ]; then
+                    yellow "正在配置 ${swap_size}MB SWAP 空间，请稍候..."
+                    
+                    if grep -q "/swapfile" /proc/swaps; then
+                        swapoff /swapfile >/dev/null 2>&1
+                    fi
+                    [ -f /swapfile ] && rm -f /swapfile
+                    
+                    if fallocate -l ${swap_size}M /swapfile 2>/dev/null; then
+                        green "空间分配成功 (fallocate)。"
+                    else
+                        yellow "fallocate 失败，尝试使用 dd 命令分配空间，这可能需要一些时间..."
+                        dd if=/dev/zero of=/swapfile bs=1M count=${swap_size} status=none
+                    fi
+                    
+                    chmod 600 /swapfile
+                    mkswap /swapfile >/dev/null 2>&1
+                    swapon /swapfile >/dev/null 2>&1
+                    
+                    if grep -q "/swapfile" /proc/swaps; then
+                        green "SWAP 启用成功！"
+                        if ! grep -q "^/swapfile" /etc/fstab; then
+                            echo "/swapfile none swap sw 0 0" >> /etc/fstab
+                        fi
+                    else
+                        red "SWAP 启用失败！这通常是因为您的 VPS 虚拟化架构 (如部分 OVZ/LXC) 在母鸡层面限制了 SWAP 权限。"
+                        rm -f /swapfile
+                    fi
+                else
+                    red "输入无效，必须为大于 0 的纯数字！"
+                fi
+                pause
                 ;;
             2)
-                read -p "请输入您想要的 SWAP 大小 (单位: MB，例如 512): " custom_size
-                if [[ "$custom_size" =~ ^[0-9]+$ ]] && [ "$custom_size" -gt 0 ]; then
-                    SWAP_SIZE=$custom_size
-                else
-                    echo -e "\033[31m输入无效，请输入纯数字。已跳过 SWAP 设置。\033[0m"
+                echo ""
+                yellow "正在关闭并清理 SWAP..."
+                if grep -q "/swapfile" /proc/swaps; then
+                    swapoff /swapfile >/dev/null 2>&1
                 fi
+                [ -f /swapfile ] && rm -f /swapfile
+                
+                if [ -f /etc/fstab ]; then
+                    sed -i '/^\/swapfile/d' /etc/fstab
+                fi
+                green "SWAP 已成功关闭并清理！"
+                pause
                 ;;
             0)
-                echo "您选择了跳过。如果后续 Xray 无法启动，请务必考虑手动添加 SWAP 或限制 Xray 内存。"
+                return
                 ;;
             *)
-                echo -e "\033[31m未知选项，已跳过 SWAP 设置。\033[0m"
+                red "无效选择"
+                pause
                 ;;
         esac
-
-        if [ "$SWAP_SIZE" -gt 0 ]; then
-            echo "正在为您创建 ${SWAP_SIZE}MB SWAP 空间..."
-            
-            if [ -f /swapfile ]; then
-                swapoff /swapfile >/dev/null 2>&1
-                rm -f /swapfile
-            fi
-
-            if fallocate -l ${SWAP_SIZE}M /swapfile 2>/dev/null; then
-                echo "存储空间分配完成。"
-            else
-                echo "正在使用 dd 命令分配空间，请稍候..."
-                dd if=/dev/zero of=/swapfile bs=1M count=${SWAP_SIZE} status=none
-            fi
-            
-            chmod 600 /swapfile
-            mkswap /swapfile >/dev/null 2>&1
-            swapon /swapfile >/dev/null 2>&1
-            
-            if swapon --show | grep -q "/swapfile"; then
-                echo -e "\033[32m${SWAP_SIZE}MB SWAP 添加并启用成功！\033[0m"
-                if ! grep -q "/swapfile" /etc/fstab; then
-                    echo "/swapfile none swap sw 0 0" >> /etc/fstab
-                fi
-            else
-                echo -e "\033[31mSWAP 启用失败！\033[0m"
-                echo -e "\033[33m原因通常是您的 VPS 虚拟化架构 (如 OVZ/LXC) 在母鸡层面限制了 SWAP 权限。\033[0m"
-                echo "建议后续通过修改 Xray 服务的 GOMEMLIMIT 环境变量来强行限制内存。"
-                rm -f /swapfile
-                echo "已自动清理无效的 swapfile 文件。"
-            fi
-            pause
-        fi
-    fi
+    done
 }
 
 trap 'echo ""; cls; red "已中断"; exit 130' INT TERM
@@ -943,13 +951,14 @@ v6: ${ip6_disp}
 \033[1;32m 3.\033[0m 管理\033[1;33mS5\033[0m        \033[1;32m 4.\033[0m 管理\033[1;33mFF\033[0m
 \033[1;32m 5.\033[0m 查看\033[1;36m节点\033[0m      \033[1;32m 6.\033[0m 修改\033[1;36mUUID\033[0m
 \033[1;32m 7.\033[0m 定时\033[1;33m重启\033[0m      \033[1;32m 8.\033[0m 创建\033[1;33m快捷\033[0m
-\033[1;91m 9.\033[0m 彻底\033[1;91m卸载\033[0m      \033[1;35m 0.\033[0m 安全\033[1;35m退出\033[0m
+\033[1;32m 9.\033[0m 管理\033[1;36mSWAP\033[0m      \033[1;91m10.\033[0m 彻底\033[1;91m卸载\033[0m
+\033[1;35m 0.\033[0m 安全\033[1;35m退出\033[0m
 ==============================================="
 
         cls; printf '%b\n' "$menu_text"
 
         clear_buffer
-        prompt "请输入(0-9): " choice
+        prompt "请输入(0-10): " choice
 
         case "${choice}" in
             1) cls; install_argo_multiplex; pause ;;
@@ -960,12 +969,12 @@ v6: ${ip6_disp}
             6) cls; modify_uuid; pause ;;
             7) manage_restart; pause ;;
             8) cls; install_shortcut; pause ;;
-            9) cls; uninstall_component "all" ;;
+            9) manage_swap ;;
+            10) cls; uninstall_component "all" ;;
             0) cls; exit 0 ;;
             *) red "无效选项"; pause ;;
         esac
     done
 }
 
-check_and_add_swap
 menu
