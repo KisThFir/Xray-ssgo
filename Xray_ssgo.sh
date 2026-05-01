@@ -343,7 +343,7 @@ smart_download() {
         rm -f "${target_file}"
         
         if [ "$use_slow_mode" -eq 1 ]; then
-            yellow "正在安全下载 (尝试 $((retry_count + 1))/${max_retries})，启用 2M/s 限速防 OOM..."
+            yellow "正在安全下载 (尝试 $((retry_count + 1))/${max_retries})，启用限速防 OOM..."
             wget -q --show-progress --limit-rate=2M --timeout=30 -O "${target_file}" "${url}"
         else
             purple "正在全速下载 (尝试 $((retry_count + 1))/${max_retries})..."
@@ -357,16 +357,16 @@ smart_download() {
                 dl_success=1
                 break
             else
-                red "下载失败: 文件体积异常或残缺 (${file_size} bytes)。"
+                red "下载失败: 文件体积异常 (${file_size} bytes，要求 >= ${min_size_bytes})。"
                 if [ "$use_slow_mode" -eq 0 ]; then
-                    yellow "自动降级为【限速安全模式】重试！"
+                    yellow "触发防卫机制，自动降级为【限速模式】重试！"
                     use_slow_mode=1
                 fi
             fi
         else
             red "下载失败: 未生成目标文件。"
             if [ "$use_slow_mode" -eq 0 ]; then
-                yellow "自动降级为【限速安全模式】重试！"
+                yellow "触发防卫机制，自动降级为【限速模式】重试！"
                 use_slow_mode=1
             fi
         fi
@@ -376,7 +376,7 @@ smart_download() {
     done
 
     if [ $dl_success -eq 0 ]; then
-        red "严重错误: ${target_file} 经过 3 次重试仍下载失败。"
+        red "严重错误: ${target_file} 经过 3 次重试仍下载失败。已强制中断以防产生垃圾配置。"
         exit 1
     fi
 }
@@ -738,7 +738,7 @@ EOF
     get_info
 }
 
-# --- 新增的 Nano 极限版安装模块 (SS-Rust + v2ray-plugin) ---
+# --- 新增/修复的 Nano 极限版安装模块 ---
 install_argo_nano() {
     cls
     echo ""; purple "=== 准备部署极限轻量版 SS-Rust + Argo ==="
@@ -765,17 +765,19 @@ install_argo_nano() {
     local SS_URL="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${SS_VER}/shadowsocks-${SS_VER}.${SS_ARCH}.tar.xz"
     local V2_URL="https://github.com/shadowsocks/v2ray-plugin/releases/download/v1.3.2/v2ray-plugin-linux-${V2_ARCH}-v1.3.2.tar.gz"
 
+    # 防错拦截解压
     if [ ! -f "/etc/ss-rust/ssserver" ]; then
-        smart_download "/etc/ss-rust/ss.tar.xz" "${SS_URL}" 2000000
-        tar -xf "/etc/ss-rust/ss.tar.xz" -C /etc/ss-rust/
+        smart_download "/etc/ss-rust/ss.tar.xz" "${SS_URL}" 1000000
+        tar -xf "/etc/ss-rust/ss.tar.xz" -C /etc/ss-rust/ || { red "解压 SS-Rust 失败！内存极小发生了 OOM 强杀，已安全中断。"; rm -f /etc/ss-rust/ss.tar.xz; pause; return 1; }
         rm -f /etc/ss-rust/ss.tar.xz /etc/ss-rust/sslocal /etc/ss-rust/ssmanager /etc/ss-rust/ssservice
         chmod +x /etc/ss-rust/ssserver
     fi
 
     if [ ! -f "/etc/ss-rust/v2ray-plugin" ]; then
-        smart_download "/etc/ss-rust/v2.tar.gz" "${V2_URL}" 3000000
-        tar -xzf "/etc/ss-rust/v2.tar.gz" -C /etc/ss-rust/
-        mv /etc/ss-rust/v2ray-plugin* /etc/ss-rust/v2ray-plugin 2>/dev/null
+        smart_download "/etc/ss-rust/v2.tar.gz" "${V2_URL}" 1000000
+        tar -xzf "/etc/ss-rust/v2.tar.gz" -C /etc/ss-rust/ || { red "解压 V2ray-Plugin 失败！"; pause; return 1; }
+        # 强制精准重命名
+        find /etc/ss-rust -name "v2ray-plugin_linux_*" -exec mv {} /etc/ss-rust/v2ray-plugin \; 2>/dev/null
         chmod +x /etc/ss-rust/v2ray-plugin
     fi
 
@@ -812,7 +814,7 @@ install_argo_nano() {
     local ss_method="aes-128-gcm"
     [ "$m_choice" = "2" ] && ss_method="aes-256-gcm"
 
-    # 写入 Nano 专属配置文件
+    # 固化配置文件，让菜单无论如何都能认出它
     echo "${argo_domain}|${ss_method}|${ss_pass}" > /etc/ss-rust/nano.conf
 
     echo "$argo_domain" > "${work_dir}/domain_argo.txt"
@@ -832,6 +834,7 @@ ingress:
   - service: http_status:404
 EOF
 
+    # 兼容高版本系统的守护进程
     if [ ! -f /etc/systemd/system/ss-rust.service ]; then
         cat > /etc/systemd/system/ss-rust.service << EOF
 [Unit]
@@ -871,6 +874,7 @@ WantedBy=multi-user.target
 EOF
     manage_service enable ${svc_name}
     
+    # 规避端口冲突，强制杀死 Xray
     manage_service stop xray 2>/dev/null
     
     manage_service restart ss-rust
@@ -880,6 +884,7 @@ EOF
     get_info
 }
 
+# --- 修复显示逻辑的 get_info ---
 get_info() {
     cls
     check_system_ip
@@ -890,36 +895,27 @@ get_info() {
 
     echo ""; green "=============== 当前可用节点链接 =============="
 
-    if [ -f "${work_dir}/domain_argo.txt" ] && is_service_running "xray"; then
+    if [ -f "${work_dir}/domain_argo.txt" ] && [ -f "${work_dir}/xray" ]; then
         local domain_argo=$(cat "${work_dir}/domain_argo.txt")
-
         local name_xhttp="${NODE_PREFIX} - XHTTP"
-        local xhttp_extra_uri
-        xhttp_extra_uri=$(url_encode "$XHTTP_EXTRA_JSON")
+        local xhttp_extra_uri=$(url_encode "$XHTTP_EXTRA_JSON")
         local link_xhttp="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&alpn=h2&fp=chrome&type=xhttp&host=${domain_argo}&path=%2Fxgo&mode=${XHTTP_MODE}&extra=${xhttp_extra_uri}#$(url_encode "$name_xhttp")"
         purple "${link_xhttp}"; echo ""; ((node_count++))
-
-        local name_ws="${NODE_PREFIX} - WS"
-        local link_ws="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&fp=chrome&type=ws&host=${domain_argo}&path=%2Fargo%3Fed%3D2560#$(url_encode "$name_ws")"
-        purple "${link_ws}"; echo ""; ((node_count++))
-
-        local ss_ib=$(jq -c '.inbounds[]? | select(.protocol == "shadowsocks" and .port == 8082)' "$config_dir" 2>/dev/null)
-        if [ -n "$ss_ib" ]; then
-            local m=$(echo "$ss_ib" | jq -r '.settings.method')
-            local pw=$(echo "$ss_ib" | jq -r '.settings.password')
-            local name_ss="${NODE_PREFIX} - SS-Xray"
-            local b64=$(echo -n "${m}:${pw}" | base64 | tr -d '\n')
-            local link_ss="ss://${b64}@${CFIP}:80?type=ws&security=none&host=${domain_argo}&path=%2Fssgo#$(url_encode "$name_ss")"
-            purple "${link_ss}"; echo ""; ((node_count++))
-        fi
     fi
 
-    if [ -f "/etc/ss-rust/nano.conf" ] && is_service_running "ss-rust"; then
+    # Nano版节点展示（抛弃强行隐藏逻辑，挂了也要亮红灯提醒）
+    if [ -f "/etc/ss-rust/nano.conf" ]; then
         IFS='|' read -r r_dom r_meth r_pass < "/etc/ss-rust/nano.conf"
         local b64=$(echo -n "${r_meth}:${r_pass}" | base64 | tr -d '\n')
         local name_ss="${NODE_PREFIX} - Nano-SS"
         local link_ss="ss://${b64}@${CFIP}:80?type=ws&security=none&host=${r_dom}&path=%2Fssgo#$(url_encode "$name_ss")"
-        purple "${link_ss}"; echo ""; ((node_count++))
+        
+        if is_service_running "ss-rust"; then
+            purple "${link_ss}"; echo ""; ((node_count++))
+        else
+            red "【警告】SS-Rust 代理内核当前为 [未运行] 状态，如果连不上请检查系统内存！"
+            purple "${link_ss}"; echo ""; ((node_count++))
+        fi
     fi
 
     if [ "${FREEFLOW_MODE}" != "none" ] && [ -n "$IP" ]; then
@@ -931,21 +927,7 @@ get_info() {
         purple "${link}"; echo ""; ((node_count++))
     fi
 
-    if [ -f "${config_dir}" ] && [ -n "$IP" ] && is_service_running "xray"; then
-        local socks_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
-        if [ -n "$socks_list" ]; then
-            while read -r line; do
-                local p=$(echo "$line" | jq -r '.port')
-                local u=$(echo "$line" | jq -r '.settings.accounts[0].user')
-                local pw=$(echo "$line" | jq -r '.settings.accounts[0].pass')
-                local name_socks="${NODE_PREFIX} - Socks5-${p}"
-                local link="socks5://${u}:${pw}@${IP}:${p}#$(url_encode "$name_socks")"
-                purple "${link}"; echo ""; ((node_count++))
-            done <<< "$socks_list"
-        fi
-    fi
-
-    [ $node_count -eq 0 ] && yellow "当前没有任何活跃的节点配置。"
+    [ $node_count -eq 0 ] && yellow "当前没有任何节点配置。"
     printf '%s\n' "==============================================="
 }
 
@@ -1049,7 +1031,6 @@ modify_uuid() {
     fi
 }
 
-# --- 核心修改：抛弃 fallocate，采用纯 dd 物理 0 填充的高兼容模式 ---
 manage_swap() {
     while true; do
         cls
@@ -1141,6 +1122,7 @@ manage_swap() {
     done
 }
 
+# --- 修复核心主菜单判定逻辑 ---
 trap 'echo ""; cls; red "已中断"; exit 130' INT TERM
 
 menu() {
@@ -1157,8 +1139,13 @@ menu() {
 
         [ ! -f "${work_dir}/domain_argo.txt" ] && argo_stat="\033[1;91m未配置\033[0m"
 
-        local core_display="${x_stat}"
-        [ -f "/etc/ss-rust/ssserver" ] && is_service_running "ss-rust" && core_display="${ss_stat} (SS-Rust)"
+        local core_display="未配置"
+        # 精准判定：如果配置了 Nano，就死死锁住 SS-Rust 的显示
+        if [ -f "/etc/ss-rust/nano.conf" ]; then
+            core_display="${ss_stat} (SS-Rust)"
+        elif [ -f "${work_dir}/xray" ]; then
+            core_display="${x_stat} (Xray)"
+        fi
 
         local len4=${#WAN4}
         local len6=${#WAN6}
