@@ -30,7 +30,12 @@ cls() {
 url_encode() { jq -rn --arg x "$1" '$x|@uri'; }
 
 update_config() {
-    jq "$@" "${config_dir}" > "${config_dir}.tmp" && mv "${config_dir}.tmp" "${config_dir}"
+    if ! jq "$@" "${config_dir}" > "${config_dir}.tmp"; then
+        red "配置更新失败：JSON/jq 表达式异常"
+        rm -f "${config_dir}.tmp"
+        return 1
+    fi
+    mv "${config_dir}.tmp" "${config_dir}"
 }
 
 manage_service() {
@@ -73,6 +78,7 @@ UUID=$(generate_uuid)
 CFIP=${CFIP:-'172.67.146.150'}
 
 [ "$EUID" -ne 0 ] && red "请在 root 用户下运行脚本" && exit 1
+[ -t 0 ] || { red "请在交互式终端中运行脚本"; exit 1; }
 
 if [ -f "${freeflow_conf}" ]; then
     { read -r _l1; read -r _l2; } < "${freeflow_conf}"
@@ -94,15 +100,15 @@ XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPadding
 
 get_sys_info() {
     [ -n "$SYS_INFO_CACHE" ] && return
-    local os_ver kernel_ver virt mem disk
+    local os_ver kernel_ver virt mem disk os_name
 
     if [ -f /etc/alpine-release ]; then
-        read -r os_ver < /etc/alpine-release 2>/dev/null
+        read -r os_ver 2>/dev/null < /etc/alpine-release
         os_ver="Alpine ${os_ver}"
     elif [ -f /etc/os-release ]; then
         . /etc/os-release
         if [ -n "$ID" ] && [ -n "$VERSION_ID" ]; then
-            local os_name=$(echo "$ID" | sed -e 's/^[a-z]/\U&/')
+            os_name=$(echo "$ID" | sed -e 's/^[a-z]/\U&/')
             os_ver="${os_name} ${VERSION_ID}"
         elif [ -n "$PRETTY_NAME" ]; then
             os_ver="${PRETTY_NAME}"
@@ -114,13 +120,13 @@ get_sys_info() {
         os_ver="Linux"
     fi
 
-    read -r kernel_ver < /proc/sys/kernel/osrelease 2>/dev/null
+    read -r kernel_ver 2>/dev/null < /proc/sys/kernel/osrelease
     kernel_ver=${kernel_ver%%[-+]*}
 
     if grep -qa container=lxc /proc/1/environ 2>/dev/null; then virt="LXC"
     elif [ -f /proc/user_beancounters ]; then virt="OpenVZ"
     elif [ -f /sys/class/dmi/id/product_name ]; then
-        read -r virt < /sys/class/dmi/id/product_name 2>/dev/null
+        read -r virt 2>/dev/null < /sys/class/dmi/id/product_name
         virt=$(echo "$virt" | grep -ioE 'KVM|QEMU|VMware|Xen|Hyper-V' | head -n 1)
     fi
     [ -z "$virt" ] && virt="KVM"
@@ -133,20 +139,26 @@ get_sys_info() {
 
 check_system_ip() {
     [ "$IP_CHECKED" = "1" ] && return
-    local DEFAULT_LOCAL_INTERFACE4=$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
-    local DEFAULT_LOCAL_INTERFACE6=$(ip -6 route show default 2>/dev/null | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+    local DEFAULT_LOCAL_INTERFACE4
+    local DEFAULT_LOCAL_INTERFACE6
     local BIND_ADDRESS4=""
     local BIND_ADDRESS6=""
 
+    DEFAULT_LOCAL_INTERFACE4=$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+    DEFAULT_LOCAL_INTERFACE6=$(ip -6 route show default 2>/dev/null | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+
     if [ -n "${DEFAULT_LOCAL_INTERFACE4}${DEFAULT_LOCAL_INTERFACE6}" ]; then
-        local DEFAULT_LOCAL_IP4=$(ip -4 addr show $DEFAULT_LOCAL_INTERFACE4 2>/dev/null | sed -n 's#.*inet \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
-        local DEFAULT_LOCAL_IP6=$(ip -6 addr show $DEFAULT_LOCAL_INTERFACE6 2>/dev/null | sed -n 's#.*inet6 \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
+        local DEFAULT_LOCAL_IP4
+        local DEFAULT_LOCAL_IP6
+        DEFAULT_LOCAL_IP4=$(ip -4 addr show "$DEFAULT_LOCAL_INTERFACE4" 2>/dev/null | sed -n 's#.*inet \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
+        DEFAULT_LOCAL_IP6=$(ip -6 addr show "$DEFAULT_LOCAL_INTERFACE6" 2>/dev/null | sed -n 's#.*inet6 \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
         [ -n "$DEFAULT_LOCAL_IP4" ] && BIND_ADDRESS4="--bind-address=$DEFAULT_LOCAL_IP4"
         [ -n "$DEFAULT_LOCAL_IP6" ] && BIND_ADDRESS6="--bind-address=$DEFAULT_LOCAL_IP6"
     fi
 
-    local tmp4=$(mktemp)
-    local tmp6=$(mktemp)
+    local tmp4 tmp6
+    tmp4=$(mktemp)
+    tmp6=$(mktemp)
 
     wget $BIND_ADDRESS4 -4 -qO- --no-check-certificate --tries=2 --timeout=2 \
         "https://ip.cloudflare.now.cc?lang=zh-CN" > "$tmp4" 2>/dev/null &
@@ -156,18 +168,21 @@ check_system_ip() {
         "https://ip.cloudflare.now.cc?lang=zh-CN" > "$tmp6" 2>/dev/null &
     local pid6=$!
 
-    wait "$pid4" "$pid6"
+    wait "$pid4" 2>/dev/null || true
+    wait "$pid6" 2>/dev/null || true
 
-    local IP4_JSON=$(cat "$tmp4")
-    local IP6_JSON=$(cat "$tmp6")
+    local IP4_JSON IP6_JSON
+    IP4_JSON=$(cat "$tmp4" 2>/dev/null)
+    IP6_JSON=$(cat "$tmp6" 2>/dev/null)
     rm -f "$tmp4" "$tmp6"
 
     if [ -n "$IP4_JSON" ]; then
         WAN4=$(awk -F '"' '/"ip"/{print $4}' <<< "$IP4_JSON")
         COUNTRY4=$(awk -F '"' '/"country"/{print $4}' <<< "$IP4_JSON")
         EMOJI4=$(awk -F '"' '/"emoji"/{print $4}' <<< "$IP4_JSON")
-        local RAW_ASN4=$(awk -F '"' '/"asn"/{print $4}' <<< "$IP4_JSON" | grep -oE '[0-9]+')
-        local RAW_ISP4=$(awk -F '"' '/"isp"/{print $4}' <<< "$IP4_JSON")
+        local RAW_ASN4 RAW_ISP4
+        RAW_ASN4=$(awk -F '"' '/"asn"/{print $4}' <<< "$IP4_JSON" | grep -oE '[0-9]+')
+        RAW_ISP4=$(awk -F '"' '/"isp"/{print $4}' <<< "$IP4_JSON")
         [ -n "$RAW_ASN4" ] && AS_NUM4="AS${RAW_ASN4}" || AS_NUM4=$(echo "$RAW_ISP4" | grep -oE 'AS[0-9]+' | head -n 1)
         ISP_CLEAN4=$(echo "$RAW_ISP4" | sed -E 's/AS[0-9]+[ -]*//g' | sed -E 's/[, ]*(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|Hosting|Host).*$//i' | sed -E 's/ *$//')
     fi
@@ -176,8 +191,9 @@ check_system_ip() {
         WAN6=$(awk -F '"' '/"ip"/{print $4}' <<< "$IP6_JSON")
         COUNTRY6=$(awk -F '"' '/"country"/{print $4}' <<< "$IP6_JSON")
         EMOJI6=$(awk -F '"' '/"emoji"/{print $4}' <<< "$IP6_JSON")
-        local RAW_ASN6=$(awk -F '"' '/"asn"/{print $4}' <<< "$IP6_JSON" | grep -oE '[0-9]+')
-        local RAW_ISP6=$(awk -F '"' '/"isp"/{print $4}' <<< "$IP6_JSON")
+        local RAW_ASN6 RAW_ISP6
+        RAW_ASN6=$(awk -F '"' '/"asn"/{print $4}' <<< "$IP6_JSON" | grep -oE '[0-9]+')
+        RAW_ISP6=$(awk -F '"' '/"isp"/{print $4}' <<< "$IP6_JSON")
         [ -n "$RAW_ASN6" ] && AS_NUM6="AS${RAW_ASN6}" || AS_NUM6=$(echo "$RAW_ISP6" | grep -oE 'AS[0-9]+' | head -n 1)
         ISP_CLEAN6=$(echo "$RAW_ISP6" | sed -E 's/AS[0-9]+[ -]*//g' | sed -E 's/[, ]*(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|Hosting|Host).*$//i' | sed -E 's/ *$//')
     fi
@@ -193,17 +209,30 @@ check_system_ip() {
 
 get_current_uuid() {
     if [ -f "${config_dir}" ]; then
-        local id=$(jq -r '(first(.inbounds[] | select(.protocol=="vless") | .settings.clients[0].id) // empty)' "${config_dir}" 2>/dev/null)
+        local id
+        id=$(jq -r '(first(.inbounds[] | select(.protocol=="vless") | .settings.clients[0].id) // empty)' "${config_dir}" 2>/dev/null)
         [ -n "$id" ] && [ "$id" != "null" ] && echo "$id" && return
     fi
     echo "${UUID}"
 }
 
 get_mem_by_svc() {
-    local svc_cmd="$1"
-    local pid=$(pgrep -f "$svc_cmd" | head -n 1)
+    local svc_name="$1"
+    local cmd_match="$2"
+    local pid=""
+
+    if [ -f /etc/alpine-release ]; then
+        pid=$(pgrep -f "$cmd_match" | head -n 1)
+    else
+        pid=$(systemctl show -p MainPID --value "$svc_name" 2>/dev/null)
+        if [ -z "$pid" ] || [ "$pid" = "0" ]; then
+            pid=$(pgrep -f "$cmd_match" | head -n 1)
+        fi
+    fi
+
     if [ -n "$pid" ] && [ -f "/proc/$pid/status" ]; then
-        local mem=$(grep -i VmRSS "/proc/$pid/status" | awk '{print $2}')
+        local mem
+        mem=$(grep -i VmRSS "/proc/$pid/status" | awk '{print $2}')
         if [ -n "$mem" ] && [ "$mem" -gt 0 ]; then
             awk "BEGIN {printf \"%.1fM\", $mem/1024}"
         fi
@@ -216,7 +245,8 @@ check_status() {
     local cmd_match="$3"
     [ ! -f "$bin_path" ] && printf '\033[1;91m未安装\033[0m' && return 2
     if is_service_running "$svc_name"; then
-        local mem=$(get_mem_by_svc "$cmd_match")
+        local mem
+        mem=$(get_mem_by_svc "$svc_name" "$cmd_match")
         [ -n "$mem" ] && printf '\033[1;36m运行(%s)\033[0m' "$mem" || printf '\033[1;36m运行\033[0m'
         return 0
     fi
@@ -264,6 +294,18 @@ EOF
     green "快捷方式已成功创建！随时输入 ssgo 即可云端秒加载最新版脚本！"
 }
 
+maybe_offer_shortcut() {
+    if [ -x /usr/local/bin/ssgo ] || [ -x /usr/bin/ssgo ]; then
+        return
+    fi
+    echo ""
+    prompt "是否现在创建 ssgo 快捷命令？[Y/n]: " mk_short
+    case "${mk_short}" in
+        n|N) yellow "已跳过快捷方式创建" ;;
+        *) install_shortcut ;;
+    esac
+}
+
 init_xray_config() {
     mkdir -p "${work_dir}"
     if [ ! -f "${config_dir}" ]; then
@@ -305,26 +347,38 @@ ensure_dns_routing() {
     local has_dnsout
     has_dnsout=$(jq '[.outbounds[]?.tag] | contains(["dns-out"])' "${config_dir}" 2>/dev/null)
     if [ "$has_dnsout" != "true" ]; then
-        update_config '.outbounds += [{"protocol":"dns","tag":"dns-out"}]'
+        update_config '.outbounds += [{"protocol":"dns","tag":"dns-out"}]' || return 1
     fi
 
     if ! jq -e '.routing' "${config_dir}" >/dev/null 2>&1; then
-        update_config '.routing = {"domainStrategy":"AsIs","rules":[]}'
+        update_config '.routing = {"domainStrategy":"AsIs","rules":[]}' || return 1
     fi
 
     local has_port53 has_proto_dns
     has_port53=$(jq '[.routing.rules[]? | select(.port=="53")] | length' "${config_dir}" 2>/dev/null)
     has_proto_dns=$(jq '[.routing.rules[]? | select(.protocol=="dns")] | length' "${config_dir}" 2>/dev/null)
     if [ "${has_port53:-0}" -eq 0 ] || [ "${has_proto_dns:-0}" -eq 0 ]; then
-        update_config 'del(.routing.rules[]? | select(.port=="53" or .protocol=="dns"))'
+        update_config 'del(.routing.rules[]? | select(.port=="53" or .protocol=="dns"))' || return 1
         update_config '.routing.rules += [
           {"type":"field","port":"53","outboundTag":"dns-out"},
           {"type":"field","protocol":"dns","outboundTag":"dns-out"}
-        ]'
+        ]' || return 1
     fi
 }
 
-# --- 核心下载组件：智能全速/限速降级重试机制 (统一内存检测逻辑) ---
+to_ghfast_url() {
+    local src="$1"
+    case "$src" in
+        https://github.com/*|https://raw.githubusercontent.com/*)
+            echo "https://ghfast.top/${src}"
+            ;;
+        *)
+            echo "$src"
+            ;;
+    esac
+}
+
+# --- 智能下载：先直连 GitHub，失败/过慢 自动切 ghfast.top ---
 smart_download() {
     local target_file="$1"
     local url="$2"
@@ -332,46 +386,70 @@ smart_download() {
     local max_retries=3
     local retry_count=0
     local dl_success=0
+    local current_url="$url"
+    local using_mirror=0
 
-    # 统一使用从 /proc/meminfo 精确读取的物理内存值
-    local total_ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+    local total_ram
+    total_ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
     local use_slow_mode=0
 
-    # 如果检测到确实是极小内存，直接上安全模式
+    # <=75MB 直接限速
     if [ -n "$total_ram" ] && [ "$total_ram" -le 75 ]; then
         use_slow_mode=1
     fi
 
     while [ $retry_count -lt $max_retries ]; do
         rm -f "${target_file}"
-        
+
+        local t_start t_end elapsed
+        t_start=$(date +%s)
+
         if [ "$use_slow_mode" -eq 1 ]; then
             yellow "正在安全下载 (尝试 $((retry_count + 1))/${max_retries})，启用 2M/s 限速防 OOM..."
-            wget -q --show-progress --limit-rate=2M --timeout=30 -O "${target_file}" "${url}"
+            wget -q --show-progress --limit-rate=2M --timeout=30 --tries=1 -O "${target_file}" "${current_url}"
         else
             purple "正在全速下载 (尝试 $((retry_count + 1))/${max_retries})..."
-            wget -q --show-progress --timeout=30 -O "${target_file}" "${url}"
+            wget -q --show-progress --timeout=30 --tries=1 -O "${target_file}" "${current_url}"
         fi
 
-        # 校验文件存在及大小
+        t_end=$(date +%s)
+        elapsed=$((t_end - t_start))
+        [ "$elapsed" -le 0 ] && elapsed=1
+
         if [ -f "${target_file}" ]; then
-            local file_size=$(wc -c < "${target_file}" 2>/dev/null || stat -c%s "${target_file}" 2>/dev/null)
+            local file_size
+            file_size=$(wc -c < "${target_file}" 2>/dev/null || stat -c%s "${target_file}" 2>/dev/null)
             if [ -n "$file_size" ] && [ "$file_size" -ge "$min_size_bytes" ]; then
+                # 若首轮直连太慢，提示但不失败
+                if [ "$retry_count" -eq 0 ] && [ "$using_mirror" -eq 0 ]; then
+                    local speed_kbs=$((file_size / elapsed / 1024))
+                    if [ "$speed_kbs" -lt 80 ]; then
+                        yellow "检测到 GitHub 直连速度较慢 (${speed_kbs} KB/s)，后续失败将自动切换 ghfast 镜像。"
+                    fi
+                fi
                 green "下载并校验成功 (${file_size} bytes)"
                 dl_success=1
                 break
             else
                 red "下载失败: 文件体积异常或残缺 (${file_size} bytes，正常应 >= ${min_size_bytes} bytes)。"
-                if [ "$use_slow_mode" -eq 0 ]; then
-                    yellow "触发防卫机制，自动降级为【限速安全模式】重试！"
-                    use_slow_mode=1
-                fi
             fi
         else
             red "下载失败: 未生成目标文件。"
-            if [ "$use_slow_mode" -eq 0 ]; then
-                yellow "网络或内存异常，自动降级为【限速安全模式】重试！"
-                use_slow_mode=1
+        fi
+
+        # 失败后执行降级策略
+        if [ "$use_slow_mode" -eq 0 ]; then
+            yellow "触发防卫机制，自动降级为【限速安全模式】重试！"
+            use_slow_mode=1
+        fi
+
+        if [ "$using_mirror" -eq 0 ]; then
+            local mirror_url
+            mirror_url=$(to_ghfast_url "$url")
+            if [ "$mirror_url" != "$url" ]; then
+                yellow "GitHub 直连异常/过慢，切换到加速节点：ghfast.top"
+                current_url="$mirror_url"
+                using_mirror=1
             fi
         fi
 
@@ -380,10 +458,41 @@ smart_download() {
     done
 
     if [ $dl_success -eq 0 ]; then
-        red "严重错误: ${target_file} 经过 3 次重试仍下载失败。"
+        red "严重错误: ${target_file} 经过 ${max_retries} 次重试仍下载失败。"
         red "已自动终止执行，防止生成错误的残缺节点！请检查网络后重试。"
         exit 1
     fi
+}
+
+detect_xray_arch() {
+    local arch_raw
+    arch_raw=$(uname -m)
+    case "$arch_raw" in
+        x86_64|amd64) echo "64" ;;
+        aarch64|arm64) echo "arm64-v8a" ;;
+        i386|i486|i586|i686) echo "32" ;;
+        armv7l|armv7|armhf) echo "arm32-v7a" ;;
+        armv6l|armv6) echo "arm32-v6" ;;
+        s390x) echo "s390x" ;;
+        riscv64) echo "riscv64" ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+detect_cloudflared_arch() {
+    local arch_raw
+    arch_raw=$(uname -m)
+    case "$arch_raw" in
+        x86_64|amd64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        i386|i486|i586|i686) echo "386" ;;
+        armv7l|armv7|armhf) echo "arm" ;;
+        *)
+            echo ""
+            ;;
+    esac
 }
 
 install_core() {
@@ -398,15 +507,14 @@ install_core() {
     if [ ! -f "${work_dir}/${server_name}" ]; then
         echo ""
         purple "=== 准备部署 Xray 内核 ==="
-        local ARCH_RAW=$(uname -m); local ARCH_ARG
-        case "${ARCH_RAW}" in
-            'x86_64') ARCH_ARG='64' ;;
-            'aarch64'|'arm64') ARCH_ARG='arm64-v8a' ;;
-            *) ARCH_ARG='32' ;;
-        esac
+        local ARCH_ARG
+        ARCH_ARG=$(detect_xray_arch)
+        if [ -z "$ARCH_ARG" ]; then
+            red "当前系统架构 $(uname -m) 暂不支持自动安装 Xray，请手动安装。"
+            exit 1
+        fi
+
         local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCH_ARG}.zip"
-        
-        # 调用智能下载，要求 xray.zip 至少 5MB
         smart_download "${work_dir}/xray.zip" "${xray_url}" 5000000
         unzip -o "${work_dir}/xray.zip" -d "${work_dir}/" > /dev/null 2>&1
         chmod +x "${work_dir}/${server_name}"
@@ -432,7 +540,6 @@ After=network.target
 [Service]
 ExecStart=${work_dir}/xray run -c ${config_dir}
 Restart=always
-# 为极限小鸡加入的 Go 语言软限制，正常机器无负面影响
 Environment="GOGC=20"
 Environment="GOMEMLIMIT=40MiB"
 [Install]
@@ -480,12 +587,14 @@ ask_freeflow_mode() {
 }
 
 apply_freeflow_config() {
-    ensure_dns_routing
-    local cur_uuid=$(get_current_uuid)
-    update_config 'del(.inbounds[] | select(.port == 80))'
+    ensure_dns_routing || return 1
+    local cur_uuid
+    cur_uuid=$(get_current_uuid)
+    update_config 'del(.inbounds[] | select(.port == 80))' || return 1
     if [ "${FREEFLOW_MODE}" != "none" ]; then
-        local ff_json='{"port":80,"listen":"::","protocol":"vless","settings":{"clients":[{"id":"'${cur_uuid}'"}],"decryption":"none"},"streamSettings":{"network":"'${FREEFLOW_MODE}'","security":"none","'${FREEFLOW_MODE}'Settings":{"path":"'${FF_PATH}'"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"metadataOnly":false}}'
-        update_config --argjson ib "${ff_json}" '.inbounds += [$ib]'
+        local ff_json
+        ff_json='{"port":80,"listen":"::","protocol":"vless","settings":{"clients":[{"id":"'"${cur_uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"'"${FREEFLOW_MODE}"'","security":"none","'"${FREEFLOW_MODE}"'Settings":{"path":"'"${FF_PATH}"'"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"metadataOnly":false}}'
+        update_config --argjson ib "${ff_json}" '.inbounds += [$ib]' || return 1
     fi
 }
 
@@ -530,8 +639,9 @@ manage_freeflow() {
 manage_socks5() {
     while true; do
         cls; printf '\033[1;33m正在读取 Socks5 配置...\033[0m\n'
-        ensure_dns_routing
-        local socks_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
+        ensure_dns_routing || { red "DNS/路由配置初始化失败"; pause; return; }
+        local socks_list
+        socks_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
 
         cls; printf '\033[1;35m                 管理 Socks5 代理              \033[0m\n'
         if [ -z "$socks_list" ]; then
@@ -541,9 +651,10 @@ manage_socks5() {
             echo "  端口    | 用户名    | 密码"
             echo "-----------------------------------------------"
             while read -r line; do
-                local p=$(echo "$line" | jq -r '.port')
-                local u=$(echo "$line" | jq -r '.settings.accounts[0].user')
-                local pass=$(echo "$line" | jq -r '.settings.accounts[0].pass')
+                local p u pass
+                p=$(echo "$line" | jq -r '.port')
+                u=$(echo "$line" | jq -r '.settings.accounts[0].user')
+                pass=$(echo "$line" | jq -r '.settings.accounts[0].pass')
                 printf "  %-8s| %-10s| %s\n" "$p" "$u" "$pass"
             done <<< "$socks_list"
         fi
@@ -556,10 +667,12 @@ manage_socks5() {
         clear_buffer
         prompt "请输入选择: " s_choice
 
-        case "${choice}" in
+        case "${s_choice}" in
             1)
                 cls; install_core
-                prompt "输入监听端口 (如 1080): " ns_port; prompt "输入用户名: " ns_user; prompt "输入密码: " ns_pass
+                prompt "输入监听端口 (如 1080): " ns_port
+                prompt "输入用户名: " ns_user
+                prompt "输入密码: " ns_pass
                 if [[ -n "$ns_port" && "$ns_port" =~ ^[0-9]+$ && -n "$ns_user" && -n "$ns_pass" ]]; then
                     update_config --argjson p "$ns_port" --arg u "$ns_user" --arg pw "$ns_pass" \
                         '.inbounds += [{"tag":("socks-"+($p|tostring)),"port":$p,"listen":"0.0.0.0","protocol":"socks","settings":{"auth":"password","accounts":[{"user":$u,"pass":$pw}],"udp":true},"sniffing":{"enabled":true,"destOverride":["http","tls"],"metadataOnly":false}}]'
@@ -569,7 +682,10 @@ manage_socks5() {
                 fi
                 pause ;;
             2)
-                cls; prompt "请输入要修改的端口号: " edit_port; prompt "输入新用户名: " nu; prompt "输入新密码: " np
+                cls
+                prompt "请输入要修改的端口号: " edit_port
+                prompt "输入新用户名: " nu
+                prompt "输入新密码: " np
                 if [[ -n "$edit_port" && "$edit_port" =~ ^[0-9]+$ && -n "$nu" && -n "$np" ]]; then
                     update_config --argjson p "$edit_port" --arg u "$nu" --arg pw "$np" \
                         '(.inbounds[] | select(.protocol=="socks" and .port==$p) | .settings.accounts[0]) |= {"user":$u,"pass":$pw}'
@@ -580,7 +696,8 @@ manage_socks5() {
                 pause ;;
             3)
                 cls
-                local s_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
+                local s_list
+                s_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
                 if [ -z "$s_list" ]; then
                     red "当前没有可删除的 Socks5 端口"
                     pause; continue
@@ -590,7 +707,8 @@ manage_socks5() {
                 local i=1
                 local port_arr=()
                 while read -r line; do
-                    local p=$(echo "$line" | jq -r '.port')
+                    local p
+                    p=$(echo "$line" | jq -r '.port')
                     echo "  ${i}. 端口 ${p}"
                     port_arr[$i]=$p
                     i=$((i+1))
@@ -618,19 +736,23 @@ manage_socks5() {
 install_argo_multiplex() {
     cls
     install_core
-    
+
     if [ ! -f "${work_dir}/argo" ]; then
         echo ""
         purple "=== 准备部署 Cloudflared ==="
-        local ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+        local ARCH
+        ARCH=$(detect_cloudflared_arch)
+        if [ -z "$ARCH" ]; then
+            red "当前系统架构 $(uname -m) 暂不支持自动安装 cloudflared，请手动安装。"
+            return 1
+        fi
         local argo_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
-        
-        # 调用智能下载，要求 argo 至少 15MB
+
         smart_download "${work_dir}/argo" "${argo_url}" 15000000
         chmod +x "${work_dir}/argo"
     fi
-    
-    ensure_dns_routing
+
+    ensure_dns_routing || return 1
 
     echo ""; yellow "正在配置 Argo 路径分流 (WS + XHTTP + SS)"
     skyblue "  => VLESS+WS    本地端口: 8080 (Cloudflare 云端路径: /argo)"
@@ -661,7 +783,8 @@ install_argo_multiplex() {
     [ "$m_choice" = "2" ] && ss_method="aes-256-gcm"
 
     echo "$argo_domain" > "${work_dir}/domain_argo.txt"
-    local tunnel_id=$(echo "$argo_auth" | jq -r '.TunnelID' 2>/dev/null || echo "$argo_auth" | cut -d'"' -f12)
+    local tunnel_id
+    tunnel_id=$(echo "$argo_auth" | jq -r '.TunnelID' 2>/dev/null || echo "$argo_auth" | cut -d'"' -f12)
     echo "$argo_auth" > "${work_dir}/tunnel_argo.json"
 
     cat > "${work_dir}/tunnel_argo.yml" << EOF
@@ -687,11 +810,13 @@ ingress:
   - service: http_status:404
 EOF
 
-    local cur_uuid=$(get_current_uuid)
+    local cur_uuid
+    cur_uuid=$(get_current_uuid)
 
-    update_config 'del(.inbounds[] | select(.port == 8080 or .port == 8081 or .port == 8082))'
+    update_config 'del(.inbounds[] | select(.port == 8080 or .port == 8081 or .port == 8082))' || return 1
 
-    local ws_json='{"port":8080,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":"'${cur_uuid}'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/argo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
+    local ws_json
+    ws_json='{"port":8080,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":"'"${cur_uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/argo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
 
     local xhttp_json
     xhttp_json=$(jq -nc \
@@ -700,9 +825,10 @@ EOF
         --argjson extra "$XHTTP_EXTRA_JSON" \
         '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}')
 
-    local ss_json='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'${ss_method}'","password":"'${ss_pass}'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
+    local ss_json
+    ss_json='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'"${ss_method}"'","password":"'"${ss_pass}"'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
 
-    update_config --argjson ws "$ws_json" --argjson xhttp "$xhttp_json" --argjson ss "$ss_json" '.inbounds += [$ws, $xhttp, $ss]'
+    update_config --argjson ws "$ws_json" --argjson xhttp "$xhttp_json" --argjson ss "$ss_json" '.inbounds += [$ws, $xhttp, $ss]' || return 1
 
     local exec_cmd="${work_dir}/argo tunnel --edge-ip-version auto --no-autoupdate --config ${work_dir}/tunnel_argo.yml run"
     local svc_name="tunnel-argo"
@@ -738,11 +864,12 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
     fi
-    manage_service enable ${svc_name}
-    manage_service restart ${svc_name}
+    manage_service enable "${svc_name}"
+    manage_service restart "${svc_name}"
     manage_service restart xray
 
     green "Argo(WS+XHTTP+SS) 隧道分流服务部署完毕！"
+    maybe_offer_shortcut
     get_info
 }
 
@@ -751,16 +878,19 @@ get_info() {
     check_system_ip
     local IP=""
     [ -n "$WAN4" ] && IP="$WAN4" || { [ -n "$WAN6" ] && IP="[$WAN6]"; }
-    local cur_uuid=$(get_current_uuid)
+    local cur_uuid
+    cur_uuid=$(get_current_uuid)
     local node_count=0
 
     echo ""; green "=============== 当前可用节点链接 =============="
 
     if [ -f "${work_dir}/domain_argo.txt" ]; then
-        local domain_argo=$(cat "${work_dir}/domain_argo.txt")
+        local domain_argo
+        domain_argo=$(cat "${work_dir}/domain_argo.txt")
 
         local name_xhttp="${NODE_PREFIX} - XHTTP"
-        local xhttp_extra_uri=$(url_encode "$XHTTP_EXTRA_JSON")
+        local xhttp_extra_uri
+        xhttp_extra_uri=$(url_encode "$XHTTP_EXTRA_JSON")
         local link_xhttp="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&alpn=h2&fp=chrome&type=xhttp&host=${domain_argo}&path=%2Fxgo&mode=${XHTTP_MODE}&extra=${xhttp_extra_uri}#$(url_encode "$name_xhttp")"
         purple "${link_xhttp}"; echo ""; ((node_count++))
 
@@ -768,19 +898,22 @@ get_info() {
         local link_ws="vless://${cur_uuid}@${CFIP}:443?encryption=none&security=tls&sni=${domain_argo}&fp=chrome&type=ws&host=${domain_argo}&path=%2Fargo%3Fed%3D2560#$(url_encode "$name_ws")"
         purple "${link_ws}"; echo ""; ((node_count++))
 
-        local ss_ib=$(jq -c '.inbounds[]? | select(.protocol == "shadowsocks" and .port == 8082)' "$config_dir" 2>/dev/null)
+        local ss_ib
+        ss_ib=$(jq -c '.inbounds[]? | select(.protocol == "shadowsocks" and .port == 8082)' "$config_dir" 2>/dev/null)
         if [ -n "$ss_ib" ]; then
-            local m=$(echo "$ss_ib" | jq -r '.settings.method')
-            local pw=$(echo "$ss_ib" | jq -r '.settings.password')
-            local name_ss="${NODE_PREFIX} - SS"
-            local b64=$(echo -n "${m}:${pw}" | base64 | tr -d '\n')
-            local link_ss="ss://${b64}@${CFIP}:80?type=ws&security=none&host=${domain_argo}&path=%2Fssgo#$(url_encode "$name_ss")"
+            local m pw name_ss b64 link_ss
+            m=$(echo "$ss_ib" | jq -r '.settings.method')
+            pw=$(echo "$ss_ib" | jq -r '.settings.password')
+            name_ss="${NODE_PREFIX} - SS"
+            b64=$(echo -n "${m}:${pw}" | base64 | tr -d '\n')
+            link_ss="ss://${b64}@${CFIP}:80?type=ws&security=none&host=${domain_argo}&path=%2Fssgo#$(url_encode "$name_ss")"
             purple "${link_ss}"; echo ""; ((node_count++))
         fi
     fi
 
     if [ "${FREEFLOW_MODE}" != "none" ] && [ -n "$IP" ]; then
-        local path_enc=$(printf '%s' "${FF_PATH}" | sed 's|%|%25|g; s| |%20|g')
+        local path_enc
+        path_enc=$(url_encode "${FF_PATH}")
         local ff_node_name="${FREEFLOW_MODE^^}"
         [ "$ff_node_name" = "HTTPUPGRADE" ] && ff_node_name="HTTP+"
         local name_ff="${NODE_PREFIX} - FF-${ff_node_name}"
@@ -789,14 +922,16 @@ get_info() {
     fi
 
     if [ -f "${config_dir}" ] && [ -n "$IP" ]; then
-        local socks_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
+        local socks_list
+        socks_list=$(jq -c '.inbounds[]? | select(.protocol == "socks")' "$config_dir" 2>/dev/null)
         if [ -n "$socks_list" ]; then
             while read -r line; do
-                local p=$(echo "$line" | jq -r '.port')
-                local u=$(echo "$line" | jq -r '.settings.accounts[0].user')
-                local pw=$(echo "$line" | jq -r '.settings.accounts[0].pass')
-                local name_socks="${NODE_PREFIX} - Socks5-${p}"
-                local link="socks5://${u}:${pw}@${IP}:${p}#$(url_encode "$name_socks")"
+                local p u pw name_socks link
+                p=$(echo "$line" | jq -r '.port')
+                u=$(echo "$line" | jq -r '.settings.accounts[0].user')
+                pw=$(echo "$line" | jq -r '.settings.accounts[0].pass')
+                name_socks="${NODE_PREFIX} - Socks5-${p}"
+                link="socks5://${u}:${pw}@${IP}:${p}#$(url_encode "$name_socks")"
                 purple "${link}"; echo ""; ((node_count++))
             done <<< "$socks_list"
         fi
@@ -820,7 +955,7 @@ manage_restart() {
             fi
             green "服务定时重启已关闭"
         else
-            if ! command -v crontab >/dev/null 2>&1 || [ -f /etc/alpine-release ]; then
+            if ! command -v crontab >/dev/null 2>&1; then
                 if command -v apt-get >/dev/null 2>&1; then
                     manage_packages cron
                     manage_service enable cron 2>/dev/null; manage_service start cron 2>/dev/null
@@ -831,6 +966,11 @@ manage_restart() {
                 else
                     manage_packages cronie
                     manage_service enable crond 2>/dev/null; manage_service start crond 2>/dev/null
+                fi
+            else
+                if [ -f /etc/alpine-release ]; then
+                    rc-service dcron start 2>/dev/null || true
+                    rc-update add dcron default >/dev/null 2>&1 || true
                 fi
             fi
 
@@ -888,7 +1028,8 @@ modify_uuid() {
     [ -z "$new_uuid" ] && new_uuid=$(generate_uuid)
     if [ -f "${config_dir}" ]; then
         update_config --arg uuid "$new_uuid" '(.inbounds[]? | select(.protocol=="vless") | .settings.clients[0].id) |= $uuid'
-        manage_service restart xray; green "UUID 已修改为: $new_uuid"
+        manage_service restart xray
+        green "UUID 已修改为: $new_uuid"
         echo ""
         get_info
     else
@@ -899,12 +1040,13 @@ modify_uuid() {
 manage_swap() {
     while true; do
         cls
-        local TOTAL_RAM=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
-        local TOTAL_SWAP=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
-        
+        local TOTAL_RAM TOTAL_SWAP
+        TOTAL_RAM=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+        TOTAL_SWAP=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+
         [ -z "$TOTAL_RAM" ] && TOTAL_RAM=0
         [ -z "$TOTAL_SWAP" ] && TOTAL_SWAP=0
-        
+
         echo -e "\033[1;36m=============== SWAP 虚拟内存管理 ===============\033[0m"
         echo -e "物理内存 (RAM): ${TOTAL_RAM} MB"
         if [ "$TOTAL_SWAP" -gt 0 ]; then
@@ -917,23 +1059,23 @@ manage_swap() {
         echo -e "\033[1;91m 2.\033[0m 关闭并清理 SWAP"
         echo -e "\033[1;35m 0.\033[0m 返回主菜单"
         echo "==============================================="
-        
+
         prompt "请输入选择 [0-2]: " swap_opt
-        
+
         case "${swap_opt}" in
             1)
                 echo ""
                 prompt "请输入您想要设置的 SWAP 大小(MB) [推荐 256，回车默认 256]: " swap_size
                 swap_size=${swap_size:-256}
-                
+
                 if [[ "$swap_size" =~ ^[0-9]+$ ]] && [ "$swap_size" -gt 0 ]; then
                     yellow "正在配置 ${swap_size}MB SWAP 空间，请稍候..."
-                    
+
                     if grep -q "/swapfile" /proc/swaps; then
                         swapoff /swapfile >/dev/null 2>&1
                     fi
                     [ -f /swapfile ] && rm -f /swapfile
-                    
+
                     yellow "正在使用 dd 命令分配物理空间 (最高兼容性)，这可能需要一些时间，请耐心等待..."
                     if dd if=/dev/zero of=/swapfile bs=1M count=${swap_size} status=none; then
                         green "空间分配成功！"
@@ -943,11 +1085,11 @@ manage_swap() {
                         pause
                         continue
                     fi
-                    
+
                     chmod 600 /swapfile
                     mkswap /swapfile >/dev/null 2>&1
                     swapon /swapfile >/dev/null 2>&1
-                    
+
                     if grep -q "/swapfile" /proc/swaps; then
                         green "SWAP 启用成功！"
                         if ! grep -q "^/swapfile" /etc/fstab; then
@@ -969,7 +1111,7 @@ manage_swap() {
                     swapoff /swapfile >/dev/null 2>&1
                 fi
                 [ -f /swapfile ] && rm -f /swapfile
-                
+
                 if [ -f /etc/fstab ]; then
                     sed -i '/^\/swapfile/d' /etc/fstab
                 fi
@@ -991,14 +1133,16 @@ trap 'echo ""; cls; red "已中断"; exit 130' INT TERM
 
 menu() {
     cls; printf '\033[1;33m正在初始化系统信息与网络检测，请稍候...\033[0m\n'
+    manage_packages jq wget iproute2 coreutils >/dev/null 2>&1
     get_sys_info
     check_system_ip
 
     while true; do
         cls; printf '\033[1;33m正在刷新系统状态...\033[0m\n'
 
-        local x_stat=$(check_status "xray" "${work_dir}/${server_name}" "${work_dir}/xray")
-        local argo_stat=$(check_status "tunnel-argo" "${work_dir}/argo" "${work_dir}/argo tunnel")
+        local x_stat argo_stat
+        x_stat=$(check_status "xray" "${work_dir}/${server_name}" "${work_dir}/xray")
+        argo_stat=$(check_status "tunnel-argo" "${work_dir}/argo" "${work_dir}/argo tunnel")
 
         [ ! -f "${work_dir}/domain_argo.txt" ] && argo_stat="\033[1;91m未配置\033[0m"
 
@@ -1009,13 +1153,15 @@ menu() {
 
         local ip4_disp="\033[1;91m未检出\033[0m"
         if [ -n "$WAN4" ]; then
-            local pad_v4=$(printf "%-${pad_len}s" "$WAN4")
+            local pad_v4
+            pad_v4=$(printf "%-${pad_len}s" "$WAN4")
             ip4_disp="\033[1;36m${pad_v4}  (${COUNTRY4} ${AS_NUM4} ${ISP_CLEAN4})\033[0m"
         fi
 
         local ip6_disp="\033[1;91m未检出\033[0m"
         if [ -n "$WAN6" ]; then
-            local pad_v6=$(printf "%-${pad_len}s" "$WAN6")
+            local pad_v6
+            pad_v6=$(printf "%-${pad_len}s" "$WAN6")
             ip6_disp="\033[1;36m${pad_v6}  (${COUNTRY6} ${AS_NUM6} ${ISP_CLEAN6})\033[0m"
         fi
 
