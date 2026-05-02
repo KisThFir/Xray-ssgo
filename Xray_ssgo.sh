@@ -69,6 +69,7 @@ work_dir="/etc/xray"
 config_dir="${work_dir}/config.json"
 freeflow_conf="${work_dir}/freeflow.conf"
 restart_conf="${work_dir}/restart.conf"
+swap_log="/tmp/ssgo_swap.log"
 
 generate_uuid() {
     cat /proc/sys/kernel/random/uuid
@@ -98,6 +99,60 @@ RESTART_INTERVAL=0
 XHTTP_MODE="auto"
 XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPaddingPlacement":"queryInHeader","xPaddingHeader":"y2k","xPaddingKey":"_y2k"}'
 
+detect_virtualization() {
+    local virt="UNKNOWN"
+    local v=""
+    local product_name=""
+
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        v=$(systemd-detect-virt 2>/dev/null)
+        case "$v" in
+            kvm) virt="KVM" ;;
+            qemu) virt="QEMU" ;;
+            vmware) virt="VMWARE" ;;
+            xen) virt="XEN" ;;
+            microsoft|hyperv) virt="HYPER-V" ;;
+            openvz) virt="OPENVZ" ;;
+            lxc) virt="LXC" ;;
+            lxc-libvirt) virt="LXC" ;;
+            docker) virt="DOCKER" ;;
+            podman) virt="PODMAN" ;;
+            wsl) virt="WSL" ;;
+            none|"") virt="UNKNOWN" ;;
+            *) virt=$(echo "$v" | tr '[:lower:]' '[:upper:]') ;;
+        esac
+    fi
+
+    # 兜底判定：仅明确命中才显示 KVM
+    if [ "$virt" = "UNKNOWN" ]; then
+        if grep -qaE 'container=(lxc|docker|podman)' /proc/1/environ 2>/dev/null; then
+            if grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+                virt="LXC"
+            elif grep -qa 'container=docker' /proc/1/environ 2>/dev/null; then
+                virt="DOCKER"
+            elif grep -qa 'container=podman' /proc/1/environ 2>/dev/null; then
+                virt="PODMAN"
+            else
+                virt="CONTAINER"
+            fi
+        elif [ -f /proc/user_beancounters ]; then
+            virt="OPENVZ"
+        elif [ -r /sys/class/dmi/id/product_name ]; then
+            read -r product_name 2>/dev/null < /sys/class/dmi/id/product_name
+            case "$product_name" in
+                *KVM*|*kvm*) virt="KVM" ;;
+                *QEMU*|*qemu*) virt="QEMU" ;;
+                *VMware*|*vmware*) virt="VMWARE" ;;
+                *Xen*|*xen*) virt="XEN" ;;
+                *VirtualBox*|*virtualbox*) virt="VIRTUALBOX" ;;
+                *Hyper-V*|*hyperv*|*Microsoft*) virt="HYPER-V" ;;
+            esac
+        fi
+    fi
+
+    echo "$virt"
+}
+
 get_sys_info() {
     [ -n "$SYS_INFO_CACHE" ] && return
     local os_ver kernel_ver virt mem disk os_name
@@ -115,7 +170,7 @@ get_sys_info() {
         else
             os_ver="Linux"
         fi
-        os_ver=$(echo "$os_ver" | sed -E 's/ \([a-zA-Z0-9_-]+\)//g')
+        os_ver=$(echo "$os_ver" | sed -E 's/ \([a-zA-Z0-9._-]+\)//g')
     else
         os_ver="Linux"
     fi
@@ -123,33 +178,24 @@ get_sys_info() {
     read -r kernel_ver 2>/dev/null < /proc/sys/kernel/osrelease
     kernel_ver=${kernel_ver%%[-+]*}
 
-    if grep -qa container=lxc /proc/1/environ 2>/dev/null; then virt="LXC"
-    elif [ -f /proc/user_beancounters ]; then virt="OpenVZ"
-    elif [ -f /sys/class/dmi/id/product_name ]; then
-        read -r virt 2>/dev/null < /sys/class/dmi/id/product_name
-        virt=$(echo "$virt" | grep -ioE 'KVM|QEMU|VMware|Xen|Hyper-V' | head -n 1)
-    fi
-    [ -z "$virt" ] && virt="KVM"
+    virt=$(detect_virtualization)
 
     mem=$(awk '/MemTotal/{m=$2/1024; if(m>1024) printf"%.1fG",m/1024; else printf"%.0fM",m}' /proc/meminfo 2>/dev/null)
     disk=$(df -h / 2>/dev/null | awk 'NR==2{print $2}')
 
-    SYS_INFO_CACHE="${os_ver} | ${kernel_ver} | ${virt^^} | ${mem} | ${disk}"
+    SYS_INFO_CACHE="${os_ver} | ${kernel_ver} | ${virt} | ${mem} | ${disk}"
 }
 
 check_system_ip() {
     [ "$IP_CHECKED" = "1" ] && return
-    local DEFAULT_LOCAL_INTERFACE4
-    local DEFAULT_LOCAL_INTERFACE6
-    local BIND_ADDRESS4=""
-    local BIND_ADDRESS6=""
+    local DEFAULT_LOCAL_INTERFACE4 DEFAULT_LOCAL_INTERFACE6
+    local BIND_ADDRESS4="" BIND_ADDRESS6=""
 
     DEFAULT_LOCAL_INTERFACE4=$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
     DEFAULT_LOCAL_INTERFACE6=$(ip -6 route show default 2>/dev/null | awk '/default/ {for (i=0; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
 
     if [ -n "${DEFAULT_LOCAL_INTERFACE4}${DEFAULT_LOCAL_INTERFACE6}" ]; then
-        local DEFAULT_LOCAL_IP4
-        local DEFAULT_LOCAL_IP6
+        local DEFAULT_LOCAL_IP4 DEFAULT_LOCAL_IP6
         DEFAULT_LOCAL_IP4=$(ip -4 addr show "$DEFAULT_LOCAL_INTERFACE4" 2>/dev/null | sed -n 's#.*inet \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
         DEFAULT_LOCAL_IP6=$(ip -6 addr show "$DEFAULT_LOCAL_INTERFACE6" 2>/dev/null | sed -n 's#.*inet6 \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
         [ -n "$DEFAULT_LOCAL_IP4" ] && BIND_ADDRESS4="--bind-address=$DEFAULT_LOCAL_IP4"
@@ -263,20 +309,24 @@ manage_packages() {
             coreutils) cmd_check="base64" ;;
             *)         cmd_check="$package" ;;
         esac
-        command -v "$cmd_check" > /dev/null 2>&1 && continue
+        command -v "$cmd_check" >/dev/null 2>&1 && continue
 
         if [ "$need_update" -eq 1 ]; then
-            if command -v apt-get > /dev/null 2>&1; then apt-get update -y >/dev/null 2>&1
-            elif command -v apk > /dev/null 2>&1; then apk update >/dev/null 2>&1
+            if command -v apt-get >/dev/null 2>&1; then apt-get update -y >/dev/null 2>&1
+            elif command -v apk >/dev/null 2>&1; then apk update >/dev/null 2>&1
             fi
             need_update=0
         fi
 
         yellow "正在安装 ${package}..."
-        if   command -v apt-get > /dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" >/dev/null 2>&1
-        elif command -v dnf > /dev/null 2>&1; then dnf install -y "$package" >/dev/null 2>&1
-        elif command -v yum > /dev/null 2>&1; then yum install -y "$package" >/dev/null 2>&1
-        elif command -v apk > /dev/null 2>&1; then apk add "$package" >/dev/null 2>&1
+        if command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" >/dev/null 2>&1
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y "$package" >/dev/null 2>&1
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y "$package" >/dev/null 2>&1
+        elif command -v apk >/dev/null 2>&1; then
+            apk add "$package" >/dev/null 2>&1
         fi
     done
 }
@@ -378,7 +428,6 @@ to_ghfast_url() {
     esac
 }
 
-# --- 智能下载：先直连 GitHub，失败/过慢 自动切 ghfast.top ---
 smart_download() {
     local target_file="$1"
     local url="$2"
@@ -393,7 +442,6 @@ smart_download() {
     total_ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
     local use_slow_mode=0
 
-    # <=75MB 直接限速
     if [ -n "$total_ram" ] && [ "$total_ram" -le 75 ]; then
         use_slow_mode=1
     fi
@@ -420,11 +468,10 @@ smart_download() {
             local file_size
             file_size=$(wc -c < "${target_file}" 2>/dev/null || stat -c%s "${target_file}" 2>/dev/null)
             if [ -n "$file_size" ] && [ "$file_size" -ge "$min_size_bytes" ]; then
-                # 若首轮直连太慢，提示但不失败
                 if [ "$retry_count" -eq 0 ] && [ "$using_mirror" -eq 0 ]; then
                     local speed_kbs=$((file_size / elapsed / 1024))
                     if [ "$speed_kbs" -lt 80 ]; then
-                        yellow "检测到 GitHub 直连速度较慢 (${speed_kbs} KB/s)，后续失败将自动切换 ghfast 镜像。"
+                        yellow "检测到 GitHub 直连速度较慢 (${speed_kbs} KB/s)，若失败将自动切换 ghfast。"
                     fi
                 fi
                 green "下载并校验成功 (${file_size} bytes)"
@@ -437,7 +484,6 @@ smart_download() {
             red "下载失败: 未生成目标文件。"
         fi
 
-        # 失败后执行降级策略
         if [ "$use_slow_mode" -eq 0 ]; then
             yellow "触发防卫机制，自动降级为【限速安全模式】重试！"
             use_slow_mode=1
@@ -475,9 +521,7 @@ detect_xray_arch() {
         armv6l|armv6) echo "arm32-v6" ;;
         s390x) echo "s390x" ;;
         riscv64) echo "riscv64" ;;
-        *)
-            echo ""
-            ;;
+        *) echo "" ;;
     esac
 }
 
@@ -489,9 +533,7 @@ detect_cloudflared_arch() {
         aarch64|arm64) echo "arm64" ;;
         i386|i486|i586|i686) echo "386" ;;
         armv7l|armv7|armhf) echo "arm" ;;
-        *)
-            echo ""
-            ;;
+        *) echo "" ;;
     esac
 }
 
@@ -516,7 +558,7 @@ install_core() {
 
         local xray_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCH_ARG}.zip"
         smart_download "${work_dir}/xray.zip" "${xray_url}" 5000000
-        unzip -o "${work_dir}/xray.zip" -d "${work_dir}/" > /dev/null 2>&1
+        unzip -o "${work_dir}/xray.zip" -d "${work_dir}/" >/dev/null 2>&1
         chmod +x "${work_dir}/${server_name}"
         rm -f "${work_dir}/xray.zip" "${work_dir}/geosite.dat" "${work_dir}/geoip.dat" "${work_dir}/README.md" "${work_dir}/LICENSE"
     fi
@@ -560,9 +602,9 @@ ask_freeflow_mode() {
     prompt "请输入选择(1-3，回车默认3): " ff_choice
 
     case "${ff_choice}" in
-        1) FREEFLOW_MODE="ws"          ;;
+        1) FREEFLOW_MODE="ws" ;;
         2) FREEFLOW_MODE="httpupgrade" ;;
-        *) FREEFLOW_MODE="none"        ;;
+        *) FREEFLOW_MODE="none" ;;
     esac
 
     if [ "${FREEFLOW_MODE}" != "none" ]; then
@@ -618,18 +660,37 @@ manage_freeflow() {
         prompt "请输入选择: " choice
 
         case "${choice}" in
-            1) cls; ask_freeflow_mode; apply_freeflow_config; manage_service restart xray; green "FreeFlow 方式已变更"; get_info; pause ;;
+            1)
+                cls
+                ask_freeflow_mode
+                apply_freeflow_config
+                manage_service restart xray
+                green "FreeFlow 方式已变更"
+                get_info
+                pause
+                ;;
             2)
                 if [ "${FREEFLOW_MODE}" = "none" ]; then red "请先启用 FreeFlow！"; pause; continue; fi
-                cls; prompt "请输入新 path（回车保持当前 ${FF_PATH}）: " new_path
+                cls
+                prompt "请输入新 path（回车保持当前 ${FF_PATH}）: " new_path
                 if [ -n "${new_path}" ]; then
                     case "${new_path}" in /*) FF_PATH="${new_path}" ;; *) FF_PATH="/${new_path}" ;; esac
                     printf '%s\n%s\n' "${FREEFLOW_MODE}" "${FF_PATH}" > "${freeflow_conf}"
-                    apply_freeflow_config; manage_service restart xray; green "FreeFlow path 已修改为：${FF_PATH}"
+                    apply_freeflow_config
+                    manage_service restart xray
+                    green "FreeFlow path 已修改为：${FF_PATH}"
                 fi
-                get_info; pause
+                get_info
+                pause
                 ;;
-            3) FREEFLOW_MODE="none"; printf '%s\n%s\n' "${FREEFLOW_MODE}" "${FF_PATH}" > "${freeflow_conf}"; apply_freeflow_config; manage_service restart xray; green "FreeFlow 已关闭并卸载"; pause ;;
+            3)
+                FREEFLOW_MODE="none"
+                printf '%s\n%s\n' "${FREEFLOW_MODE}" "${FF_PATH}" > "${freeflow_conf}"
+                apply_freeflow_config
+                manage_service restart xray
+                green "FreeFlow 已关闭并卸载"
+                pause
+                ;;
             0) return ;;
             *) red "无效的选项！"; pause ;;
         esac
@@ -676,11 +737,13 @@ manage_socks5() {
                 if [[ -n "$ns_port" && "$ns_port" =~ ^[0-9]+$ && -n "$ns_user" && -n "$ns_pass" ]]; then
                     update_config --argjson p "$ns_port" --arg u "$ns_user" --arg pw "$ns_pass" \
                         '.inbounds += [{"tag":("socks-"+($p|tostring)),"port":$p,"listen":"0.0.0.0","protocol":"socks","settings":{"auth":"password","accounts":[{"user":$u,"pass":$pw}],"udp":true},"sniffing":{"enabled":true,"destOverride":["http","tls"],"metadataOnly":false}}]'
-                    green "添加成功！请确保服务器防火墙已放行 $ns_port 端口。"; manage_service restart xray
+                    green "添加成功！请确保服务器防火墙已放行 $ns_port 端口。"
+                    manage_service restart xray
                 else
                     red "输入无效！端口必须为数字，且用户名和密码不能为空。"
                 fi
-                pause ;;
+                pause
+                ;;
             2)
                 cls
                 prompt "请输入要修改的端口号: " edit_port
@@ -689,11 +752,13 @@ manage_socks5() {
                 if [[ -n "$edit_port" && "$edit_port" =~ ^[0-9]+$ && -n "$nu" && -n "$np" ]]; then
                     update_config --argjson p "$edit_port" --arg u "$nu" --arg pw "$np" \
                         '(.inbounds[] | select(.protocol=="socks" and .port==$p) | .settings.accounts[0]) |= {"user":$u,"pass":$pw}'
-                    green "修改完成！"; manage_service restart xray
+                    green "修改完成！"
+                    manage_service restart xray
                 else
                     red "输入无效！"
                 fi
-                pause ;;
+                pause
+                ;;
             3)
                 cls
                 local s_list
@@ -720,13 +785,15 @@ manage_socks5() {
                 if [[ "$del_idx" =~ ^[0-9]+$ ]] && [ "$del_idx" -gt 0 ] && [ "$del_idx" -lt "$i" ]; then
                     local del_port=${port_arr[$del_idx]}
                     update_config --argjson p "$del_port" 'del(.inbounds[] | select(.protocol=="socks" and .port==$p))'
-                    green "端口 $del_port 删除完成！"; manage_service restart xray
+                    green "端口 $del_port 删除完成！"
+                    manage_service restart xray
                 elif [ "$del_idx" = "0" ]; then
                     yellow "已取消删除。"
                 else
                     red "输入无效！"
                 fi
-                pause ;;
+                pause
+                ;;
             0) break ;;
             *) red "无效选择"; pause ;;
         esac
@@ -958,14 +1025,16 @@ manage_restart() {
             if ! command -v crontab >/dev/null 2>&1; then
                 if command -v apt-get >/dev/null 2>&1; then
                     manage_packages cron
-                    manage_service enable cron 2>/dev/null; manage_service start cron 2>/dev/null
+                    manage_service enable cron 2>/dev/null
+                    manage_service start cron 2>/dev/null
                 elif command -v apk >/dev/null 2>&1; then
                     manage_packages dcron
                     rc-service dcron start 2>/dev/null || true
                     rc-update add dcron default >/dev/null 2>&1 || true
                 else
                     manage_packages cronie
-                    manage_service enable crond 2>/dev/null; manage_service start crond 2>/dev/null
+                    manage_service enable crond 2>/dev/null
+                    manage_service start crond 2>/dev/null
                 fi
             else
                 if [ -f /etc/alpine-release ]; then
@@ -988,6 +1057,249 @@ manage_restart() {
     else
         red "输入无效，请输入纯数字！"
     fi
+}
+
+# ------------------ SWAP 三级回退（zram -> dd -> fallocate，含短路） ------------------
+
+swap_log() {
+    echo "[$(date '+%F %T')] $*" >> "${swap_log}"
+}
+
+swap_cleanup_entries() {
+    [ -f /etc/fstab ] && sed -i '/^\/swapfile[[:space:]]/d' /etc/fstab
+}
+
+swap_disable_all() {
+    # 尝试关闭所有激活 swap
+    awk 'NR>1{print $1}' /proc/swaps 2>/dev/null | while read -r dev; do
+        [ -n "$dev" ] && swapoff "$dev" >/dev/null 2>&1 || true
+    done
+
+    # 清理 swapfile
+    [ -f /swapfile ] && rm -f /swapfile
+    swap_cleanup_entries
+
+    # 若存在 zram 设备，尽量 reset
+    if [ -d /sys/class/zram-control ] || [ -e /dev/zram0 ]; then
+        for z in /sys/block/zram*; do
+            [ -d "$z" ] || continue
+            echo 1 > "$z/reset" 2>/dev/null || true
+        done
+    fi
+}
+
+zram_supported() {
+    # 已有 zram 设备
+    [ -e /dev/zram0 ] && return 0
+
+    # 尝试加载模块
+    if [ -d /sys/module/zram ] || command -v modprobe >/dev/null 2>&1; then
+        modprobe zram >/dev/null 2>&1 || true
+    fi
+
+    # 设备存在 / 可 hot_add 即认为支持
+    [ -e /dev/zram0 ] && return 0
+    [ -w /sys/class/zram-control/hot_add ] && return 0
+
+    return 1
+}
+
+create_zram_swap() {
+    local size_mb="$1"
+    local zdev=""
+    local zname=""
+
+    if [ -e /dev/zram0 ]; then
+        zdev="/dev/zram0"
+    elif [ -w /sys/class/zram-control/hot_add ]; then
+        local zid
+        zid=$(cat /sys/class/zram-control/hot_add 2>/dev/null)
+        [ -n "$zid" ] && zdev="/dev/zram${zid}"
+    fi
+
+    [ -z "$zdev" ] && return 1
+    zname="${zdev#/dev/}"
+
+    # reset
+    echo 1 > "/sys/block/${zname}/reset" 2>/dev/null || true
+
+    # 算法可选
+    if [ -w "/sys/block/${zname}/comp_algorithm" ]; then
+        echo lz4 > "/sys/block/${zname}/comp_algorithm" 2>/dev/null || true
+    fi
+
+    # 设置容量，mkswap + swapon
+    echo "$((size_mb * 1024 * 1024))" > "/sys/block/${zname}/disksize" 2>/dev/null || return 1
+    mkswap "${zdev}" >/dev/null 2>&1 || return 1
+    swapon "${zdev}" >/tmp/swapon_err.log 2>&1 || return 1
+
+    return 0
+}
+
+create_swapfile_dd() {
+    local size_mb="$1"
+
+    dd if=/dev/zero of=/swapfile bs=1M count="${size_mb}" status=none 2>/tmp/dd_err.log || return 10
+    chmod 600 /swapfile || return 11
+    mkswap /swapfile >/dev/null 2>&1 || return 12
+    swapon /swapfile >/tmp/swapon_err.log 2>&1 || return 13
+
+    if ! grep -q "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null; then
+        echo "/swapfile none swap sw 0 0" >> /etc/fstab
+    fi
+    return 0
+}
+
+create_swapfile_fallocate() {
+    local size_mb="$1"
+
+    command -v fallocate >/dev/null 2>&1 || return 20
+    fallocate -l "${size_mb}M" /swapfile 2>/tmp/fallocate_err.log || return 21
+    chmod 600 /swapfile || return 22
+    mkswap -f /swapfile >/dev/null 2>&1 || return 23
+    swapon /swapfile >/tmp/swapon_err.log 2>&1 || return 24
+
+    if ! grep -q "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null; then
+        echo "/swapfile none swap sw 0 0" >> /etc/fstab
+    fi
+    return 0
+}
+
+swap_dd_should_short_circuit() {
+    # 短路条件：继续试 fallocate 基本无意义
+    local combined=""
+    [ -f /tmp/dd_err.log ] && combined="${combined} $(cat /tmp/dd_err.log)"
+    [ -f /tmp/swapon_err.log ] && combined="${combined} $(cat /tmp/swapon_err.log)"
+
+    echo "$combined" | grep -qiE \
+        'Operation not permitted|No space left on device|Read-only file system|Permission denied'
+}
+
+create_swap_best_effort() {
+    local size_mb="$1"
+    [ -z "$size_mb" ] && size_mb=256
+
+    : > "${swap_log}"
+    rm -f /tmp/dd_err.log /tmp/fallocate_err.log /tmp/swapon_err.log
+
+    swap_disable_all
+    swap_log "start swap setup size=${size_mb}MB"
+
+    # Level 1: zram（先判断支持）
+    if zram_supported; then
+        yellow "检测到内核支持 zram，优先尝试 zram..."
+        swap_log "zram supported, trying zram"
+        if create_zram_swap "$size_mb"; then
+            green "SWAP 启用成功（ZRAM，${size_mb}MB）"
+            swap_log "zram success"
+            return 0
+        else
+            yellow "zram 启用失败，继续回退到 swapfile..."
+            swap_log "zram failed"
+        fi
+    else
+        yellow "内核未检测到 zram 能力，跳过 zram。"
+        swap_log "zram not supported"
+    fi
+
+    # Level 2: dd
+    yellow "尝试 swapfile（dd）..."
+    swap_log "trying dd swapfile"
+    if create_swapfile_dd "$size_mb"; then
+        green "SWAP 启用成功（dd swapfile，${size_mb}MB）"
+        swap_log "dd success"
+        return 0
+    fi
+    swap_log "dd failed"
+
+    # 短路判断
+    if swap_dd_should_short_circuit; then
+        red "dd 失败原因属于权限/空间/只读类问题，已短路停止，不再尝试 fallocate。"
+        local err_msg=""
+        [ -f /tmp/dd_err.log ] && err_msg="${err_msg} $(cat /tmp/dd_err.log)"
+        [ -f /tmp/swapon_err.log ] && err_msg="${err_msg} $(cat /tmp/swapon_err.log)"
+        red "错误信息：${err_msg:-未知错误}"
+        swap_log "short-circuit triggered"
+        return 1
+    fi
+
+    # Level 3: fallocate
+    rm -f /swapfile /tmp/swapon_err.log
+    yellow "尝试 swapfile（fallocate）..."
+    swap_log "trying fallocate swapfile"
+    if create_swapfile_fallocate "$size_mb"; then
+        green "SWAP 启用成功（fallocate swapfile，${size_mb}MB）"
+        swap_log "fallocate success"
+        return 0
+    fi
+    swap_log "fallocate failed"
+
+    local err_final=""
+    [ -f /tmp/fallocate_err.log ] && err_final="${err_final} $(cat /tmp/fallocate_err.log)"
+    [ -f /tmp/swapon_err.log ] && err_final="${err_final} $(cat /tmp/swapon_err.log)"
+
+    if echo "$err_final" | grep -qi "Operation not permitted"; then
+        red "SWAP 启用失败：宿主机/容器策略限制了 swapon（Operation not permitted）。"
+    else
+        red "SWAP 启用失败：${err_final:-未知错误}"
+    fi
+    return 1
+}
+
+manage_swap() {
+    while true; do
+        cls
+        local TOTAL_RAM TOTAL_SWAP
+        TOTAL_RAM=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+        TOTAL_SWAP=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+
+        [ -z "$TOTAL_RAM" ] && TOTAL_RAM=0
+        [ -z "$TOTAL_SWAP" ] && TOTAL_SWAP=0
+
+        echo -e "\033[1;36m=============== SWAP 虚拟内存管理 ===============\033[0m"
+        echo -e "物理内存 (RAM): ${TOTAL_RAM} MB"
+        if [ "$TOTAL_SWAP" -gt 0 ]; then
+            echo -e "虚拟内存 (SWAP): \033[1;32m${TOTAL_SWAP} MB (已开启)\033[0m"
+        else
+            echo -e "虚拟内存 (SWAP): \033[1;91m0 MB (未开启)\033[0m"
+        fi
+        echo "-----------------------------------------------"
+        echo -e "\033[1;32m 1.\033[0m 添加 / 修改 SWAP (ZRAM -> DD -> FALLOCATE)"
+        echo -e "\033[1;91m 2.\033[0m 关闭并清理 SWAP"
+        echo -e "\033[1;35m 0.\033[0m 返回主菜单"
+        echo "==============================================="
+
+        prompt "请输入选择 [0-2]: " swap_opt
+
+        case "${swap_opt}" in
+            1)
+                echo ""
+                prompt "请输入您想要设置的 SWAP 大小(MB) [推荐 256，回车默认 256]: " swap_size
+                swap_size=${swap_size:-256}
+
+                if [[ "$swap_size" =~ ^[0-9]+$ ]] && [ "$swap_size" -gt 0 ]; then
+                    yellow "正在配置 ${swap_size}MB SWAP 空间，请稍候..."
+                    if create_swap_best_effort "$swap_size"; then
+                        green "SWAP 配置完成！"
+                    else
+                        red "SWAP 配置失败！可查看日志：${swap_log}"
+                    fi
+                else
+                    red "输入无效，必须为大于 0 的纯数字！"
+                fi
+                pause
+                ;;
+            2)
+                echo ""
+                yellow "正在关闭并清理 SWAP..."
+                swap_disable_all
+                green "SWAP 已成功关闭并清理！"
+                pause
+                ;;
+            0) return ;;
+            *) red "无效选择"; pause ;;
+        esac
+    done
 }
 
 uninstall_component() {
@@ -1017,6 +1329,8 @@ uninstall_component() {
             (crontab -l 2>/dev/null | sed '/#svc-restart/d') | crontab -
         fi
 
+        swap_disable_all >/dev/null 2>&1 || true
+
         rm -rf "${work_dir}" /usr/bin/ssgo /usr/local/bin/ssgo
         green "所有组件及定时任务已彻底卸载完成！"
         exit 0
@@ -1035,98 +1349,6 @@ modify_uuid() {
     else
         yellow "配置文件不存在，请先安装节点"
     fi
-}
-
-manage_swap() {
-    while true; do
-        cls
-        local TOTAL_RAM TOTAL_SWAP
-        TOTAL_RAM=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
-        TOTAL_SWAP=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
-
-        [ -z "$TOTAL_RAM" ] && TOTAL_RAM=0
-        [ -z "$TOTAL_SWAP" ] && TOTAL_SWAP=0
-
-        echo -e "\033[1;36m=============== SWAP 虚拟内存管理 ===============\033[0m"
-        echo -e "物理内存 (RAM): ${TOTAL_RAM} MB"
-        if [ "$TOTAL_SWAP" -gt 0 ]; then
-            echo -e "虚拟内存 (SWAP): \033[1;32m${TOTAL_SWAP} MB (已开启)\033[0m"
-        else
-            echo -e "虚拟内存 (SWAP): \033[1;91m0 MB (未开启)\033[0m"
-        fi
-        echo "-----------------------------------------------"
-        echo -e "\033[1;32m 1.\033[0m 添加 / 修改 SWAP (纯 dd 兼容模式)"
-        echo -e "\033[1;91m 2.\033[0m 关闭并清理 SWAP"
-        echo -e "\033[1;35m 0.\033[0m 返回主菜单"
-        echo "==============================================="
-
-        prompt "请输入选择 [0-2]: " swap_opt
-
-        case "${swap_opt}" in
-            1)
-                echo ""
-                prompt "请输入您想要设置的 SWAP 大小(MB) [推荐 256，回车默认 256]: " swap_size
-                swap_size=${swap_size:-256}
-
-                if [[ "$swap_size" =~ ^[0-9]+$ ]] && [ "$swap_size" -gt 0 ]; then
-                    yellow "正在配置 ${swap_size}MB SWAP 空间，请稍候..."
-
-                    if grep -q "/swapfile" /proc/swaps; then
-                        swapoff /swapfile >/dev/null 2>&1
-                    fi
-                    [ -f /swapfile ] && rm -f /swapfile
-
-                    yellow "正在使用 dd 命令分配物理空间 (最高兼容性)，这可能需要一些时间，请耐心等待..."
-                    if dd if=/dev/zero of=/swapfile bs=1M count=${swap_size} status=none; then
-                        green "空间分配成功！"
-                    else
-                        red "空间分配失败！可能是硬盘空间不足。"
-                        rm -f /swapfile
-                        pause
-                        continue
-                    fi
-
-                    chmod 600 /swapfile
-                    mkswap /swapfile >/dev/null 2>&1
-                    swapon /swapfile >/dev/null 2>&1
-
-                    if grep -q "/swapfile" /proc/swaps; then
-                        green "SWAP 启用成功！"
-                        if ! grep -q "^/swapfile" /etc/fstab; then
-                            echo "/swapfile none swap sw 0 0" >> /etc/fstab
-                        fi
-                    else
-                        red "SWAP 启用失败！这通常是因为您的 VPS 虚拟化架构 (如 LXC/OpenVZ) 在母鸡层面限制了 swapon 权限。"
-                        rm -f /swapfile
-                    fi
-                else
-                    red "输入无效，必须为大于 0 的纯数字！"
-                fi
-                pause
-                ;;
-            2)
-                echo ""
-                yellow "正在关闭并清理 SWAP..."
-                if grep -q "/swapfile" /proc/swaps; then
-                    swapoff /swapfile >/dev/null 2>&1
-                fi
-                [ -f /swapfile ] && rm -f /swapfile
-
-                if [ -f /etc/fstab ]; then
-                    sed -i '/^\/swapfile/d' /etc/fstab
-                fi
-                green "SWAP 已成功关闭并清理！"
-                pause
-                ;;
-            0)
-                return
-                ;;
-            *)
-                red "无效选择"
-                pause
-                ;;
-        esac
-    done
 }
 
 trap 'echo ""; cls; red "已中断"; exit 130' INT TERM
