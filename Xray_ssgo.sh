@@ -17,7 +17,7 @@ work_dir="/etc/xray"
 xray_bin="${work_dir}/xray"
 xray_conf="${work_dir}/config.json"
 
-# sing-box 新目录（不再放到 /etc/xray 下）
+# sing-box 独立目录
 SB_BASE="/etc/sing-box"
 sb_bin="${SB_BASE}/sing-box"
 sb_conf="${SB_BASE}/config.json"
@@ -34,7 +34,7 @@ argo_domain_file="${work_dir}/domain_argo.txt"
 argo_yml="${work_dir}/tunnel_argo.yml"
 argo_json="${work_dir}/tunnel_argo.json"
 
-# TLS 目录改为 /etc/tuic/tls
+# TLS目录
 tls_dir="/etc/tuic/tls"
 
 UUID_FALLBACK="$(cat /proc/sys/kernel/random/uuid)"
@@ -47,12 +47,12 @@ RESTART_HOURS=0
 XHTTP_MODE="auto"
 XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPaddingPlacement":"queryInHeader","xPaddingHeader":"y2k","xPaddingKey":"_y2k"}'
 
-# 出站策略：默认 v4 only + youtube v6 开关
 YOUTUBE_V6=0
 V6_SITE_LIST=""
 
 IP_CHECKED=0
 IP_CHECK_BG_STARTED=0
+IP_CACHE_MTIME=0
 WAN4="" WAN6=""
 COUNTRY4="" AS_NUM4="" ISP_CLEAN4="" EMOJI4=""
 COUNTRY6="" AS_NUM6="" ISP_CLEAN6="" EMOJI6=""
@@ -295,7 +295,10 @@ get_sys_info() {
 
 save_ip_cache() {
     mkdir -p "$work_dir"
+    local now
+    now=$(date +%s 2>/dev/null || echo 0)
     cat > "$ip_cache_file" <<EOF
+UPDATED_AT=$(printf '%q' "$now")
 WAN4=$(printf '%q' "$WAN4")
 WAN6=$(printf '%q' "$WAN6")
 COUNTRY4=$(printf '%q' "$COUNTRY4")
@@ -310,15 +313,35 @@ NODE_PREFIX=$(printf '%q' "$NODE_PREFIX")
 EOF
 }
 
+apply_node_prefix_from_current_ip() {
+    NODE_PREFIX="Argo"
+    if [ -n "$EMOJI4" ] && [ -n "$ISP_CLEAN4" ]; then
+        NODE_PREFIX="${EMOJI4}[${COUNTRY4}] ${ISP_CLEAN4}"
+    elif [ -n "$EMOJI6" ] && [ -n "$ISP_CLEAN6" ]; then
+        NODE_PREFIX="${EMOJI6}[${COUNTRY6}] ${ISP_CLEAN6}"
+    fi
+}
+
 load_ip_cache() {
     [ -f "$ip_cache_file" ] || return 1
     # shellcheck disable=SC1090
     . "$ip_cache_file" 2>/dev/null || return 1
+    apply_node_prefix_from_current_ip
     if [ -n "$WAN4" ] || [ -n "$WAN6" ]; then
         IP_CHECKED=1
         return 0
     fi
     return 1
+}
+
+refresh_ip_cache_if_changed() {
+    [ -f "$ip_cache_file" ] || return 1
+    local mt
+    mt=$(stat -c %Y "$ip_cache_file" 2>/dev/null || echo 0)
+    [ "$mt" -gt "$IP_CACHE_MTIME" ] || return 1
+    IP_CACHE_MTIME="$mt"
+    load_ip_cache >/dev/null 2>&1 || true
+    return 0
 }
 
 check_system_ip() {
@@ -339,9 +362,9 @@ check_system_ip() {
     t4=$(mktemp)
     t6=$(mktemp)
 
-    wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=2 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t4" 2>/dev/null &
+    wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t4" 2>/dev/null &
     local p4=$!
-    wget $BA6 -6 -qO- --no-check-certificate --tries=2 --timeout=2 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t6" 2>/dev/null &
+    wget $BA6 -6 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t6" 2>/dev/null &
     local p6=$!
 
     wait "$p4" 2>/dev/null || true
@@ -357,7 +380,7 @@ check_system_ip() {
         COUNTRY4=$(awk -F '"' '/"country"/{print $4}' <<< "$J4")
         EMOJI4=$(awk -F '"' '/"emoji"/{print $4}' <<< "$J4")
         local A4 I4
-        A4=$(awk -F '"' '/"asn"/{print $4}' <<< "$J4" | grep -oE '[0-9]+')
+        A4=$(awk -F '"' '/"asn"/{print $4}' <<< "$J4" | grep -oE '[0-9]+' | head -n1)
         I4=$(awk -F '"' '/"isp"/{print $4}' <<< "$J4")
         [ -n "$A4" ] && AS_NUM4="AS${A4}" || AS_NUM4=$(echo "$I4" | grep -oE 'AS[0-9]+' | head -n1)
         ISP_CLEAN4=$(echo "$I4" | sed -E 's/AS[0-9]+[ -]*//g' | sed -E 's/[, ]*(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|Hosting|Host).*$//i' | sed -E 's/ *$//')
@@ -368,25 +391,22 @@ check_system_ip() {
         COUNTRY6=$(awk -F '"' '/"country"/{print $4}' <<< "$J6")
         EMOJI6=$(awk -F '"' '/"emoji"/{print $4}' <<< "$J6")
         local A6 I6
-        A6=$(awk -F '"' '/"asn"/{print $4}' <<< "$J6" | grep -oE '[0-9]+')
+        A6=$(awk -F '"' '/"asn"/{print $4}' <<< "$J6" | grep -oE '[0-9]+' | head -n1)
         I6=$(awk -F '"' '/"isp"/{print $4}' <<< "$J6")
         [ -n "$A6" ] && AS_NUM6="AS${A6}" || AS_NUM6=$(echo "$I6" | grep -oE 'AS[0-9]+' | head -n1)
         ISP_CLEAN6=$(echo "$I6" | sed -E 's/AS[0-9]+[ -]*//g' | sed -E 's/[, ]*(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|Hosting|Host).*$//i' | sed -E 's/ *$//')
     fi
 
-    NODE_PREFIX="Argo"
-    if [ -n "$EMOJI4" ] && [ -n "$ISP_CLEAN4" ]; then
-        NODE_PREFIX="${EMOJI4}[${COUNTRY4}] ${ISP_CLEAN4}"
-    elif [ -n "$EMOJI6" ] && [ -n "$ISP_CLEAN6" ]; then
-        NODE_PREFIX="${EMOJI6}[${COUNTRY6}] ${ISP_CLEAN6}"
-    fi
+    apply_node_prefix_from_current_ip
     IP_CHECKED=1
     save_ip_cache
 }
 start_ip_check_bg() {
     [ "$IP_CHECK_BG_STARTED" = "1" ] && return
     IP_CHECK_BG_STARTED=1
-    (check_system_ip >/dev/null 2>&1) &
+    (
+      check_system_ip >/dev/null 2>&1
+    ) &
 }
 
 get_used_mem_display() {
@@ -550,7 +570,7 @@ apply_outbound_policy_all() {
     apply_outbound_policy_singbox || true
     service_exists xray && manage_service restart xray
     service_exists tuic-box && manage_service restart tuic-box
-    green "出站策略已应用（Xray + sing-box）"
+    green "出站策略已应用（Xray + Sbox）"
     return 0
 }
 
@@ -634,9 +654,9 @@ ask_freeflow_mode() {
     echo ""
     green "请选择免流方式"
     echo "-----------------------------------------------"
-    echo -e "\033[1;32m 1.\033[0m VLESS + \033[1;36mWS\033[0m"
-    echo -e "\033[1;32m 2.\033[0m VLESS + \033[1;36mHTTPUpgrade\033[0m"
-    echo -e "\033[1;91m 3.\033[0m 关闭"
+    echo -e "\033[1;32m 1.\033[0m \033[1;32m安装\033[0m  \033[1;33m免流\033[0m + \033[1;36mWS\033[0m"
+    echo -e "\033[1;32m 2.\033[0m \033[1;32m安装\033[0m  \033[1;33m免流\033[0m + \033[1;36mHTTPUpgrade\033[0m"
+    echo -e "\033[1;91m 3.\033[0m \033[1;91m卸载\033[0m  \033[1;33m免流\033[0m"
     echo "-----------------------------------------------"
     prompt "请选择: " c
     case "$c" in
@@ -684,10 +704,10 @@ manage_freeflow() {
         echo -e "\033[1;33m=============== 免流管理 ===============\033[0m"
         printf "当前: %b\n" "$s"
         echo "-----------------------------------------------"
-        echo -e "\033[1;32m 1.\033[0m 变更\033[1;36m方式\033[0m"
-        echo -e "\033[1;32m 2.\033[0m 修改\033[1;36m路径\033[0m"
-        echo -e "\033[1;91m 3.\033[0m 卸载"
-        echo -e "\033[1;35m 0.\033[0m 返回"
+        echo -e "\033[1;32m 1.\033[0m 变更\033[1;33m免流方式\033[0m"
+        echo -e "\033[1;32m 2.\033[0m 修改\033[1;33m免流路径\033[0m"
+        echo -e "\033[1;91m 3.\033[0m 卸载\033[1;33m免流\033[0m"
+        echo -e "\033[1;91m 0.\033[0m 返回"
         echo "==============================================="
         prompt "请选择: " c
         case "$c" in
@@ -723,7 +743,7 @@ manage_socks5() {
         local list
         list=$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$xray_conf" 2>/dev/null)
 
-        echo -e "\033[1;35m=============== Socks5 管理 ===============\033[0m"
+        echo -e "\033[1;33m=============== Socks5 管理 ===============\033[0m"
         if [ -z "$list" ]; then
             echo -e "当前: \033[1;91m未配置\033[0m"
         else
@@ -740,10 +760,10 @@ manage_socks5() {
         fi
 
         echo "-----------------------------------------------"
-        echo -e "\033[1;32m 1.\033[0m 添\033[1;36m加\033[0m"
-        echo -e "\033[1;32m 2.\033[0m 修\033[1;36m改\033[0m"
-        echo -e "\033[1;91m 3.\033[0m 删\033[1;36m除\033[0m"
-        echo -e "\033[1;35m 0.\033[0m 返回"
+        echo -e "\033[1;32m 1.\033[0m \033[1;32m安装\033[0m \033[1;33mSocks5\033[0m"
+        echo -e "\033[1;36m 2.\033[0m \033[1;36m重启\033[0m \033[1;33mSocks5配置\033[0m"
+        echo -e "\033[1;91m 3.\033[0m \033[1;91m卸载\033[0m \033[1;33mSocks5\033[0m"
+        echo -e "\033[1;91m 0.\033[0m 返回"
         echo "==============================================="
         prompt "请选择: " c
 
@@ -841,7 +861,6 @@ install_or_reinstall_argo() {
     prompt "Argo JSON凭证: " auth
     echo "$auth" | grep -q "TunnelSecret" || { red "必须是JSON凭证"; return 1; }
 
-    # SS默认密码改为随机UUID
     prompt "SS密码(回车随机UUID): " ss_pass
     [ -z "$ss_pass" ] && ss_pass=$(generate_uuid)
     prompt "SS加密(1/2): " mc
@@ -952,7 +971,9 @@ restart_xray_if_installed() {
 
 show_xray_nodes() {
     cls
-    check_system_ip
+    # 节点展示场景，强制刷新一次（若无缓存）
+    [ "$IP_CHECKED" = "1" ] || { load_ip_cache >/dev/null 2>&1 || true; }
+    [ "$IP_CHECKED" = "1" ] || check_system_ip
     [ -f "$xray_conf" ] || { yellow "xray未安装"; echo "==============================================="; return; }
 
     local ip=""
@@ -1279,8 +1300,8 @@ install_tuic_flow() {
 }
 
 restart_singbox_menu() {
-    if ! service_exists tuic-box; then yellow "sing-box未安装"; return; fi
-    start_singbox_and_check && green "sing-box已重启"
+    if ! service_exists tuic-box; then yellow "Sbox未安装"; return; fi
+    start_singbox_and_check && green "Sbox已重启"
 }
 
 uninstall_singbox_menu() {
@@ -1288,7 +1309,7 @@ uninstall_singbox_menu() {
     manage_service disable tuic-box 2>/dev/null
     rm -f /etc/init.d/tuic-box /etc/systemd/system/tuic-box.service
     rm -rf "$SB_BASE"
-    green "sing-box 已卸载"
+    green "Sbox 已卸载"
 }
 
 load_restart_hours() {
@@ -1413,9 +1434,9 @@ manage_swap() {
         echo -e "\033[1;36m=============== SWAP 管理 ===============\033[0m"
         echo "RAM: ${ram}MB  SWAP: ${sw}MB"
         echo "-----------------------------------------------"
-        echo -e "\033[1;32m 1.\033[0m 添\033[1;36m加/修改\033[0m"
-        echo -e "\033[1;91m 2.\033[0m 关\033[1;36m闭清理\033[0m"
-        echo -e "\033[1;35m 0.\033[0m 返回"
+        echo -e "\033[1;32m 1.\033[0m \033[1;32m安装\033[0m/\033[1;36m重启\033[0m SWAP"
+        echo -e "\033[1;91m 2.\033[0m \033[1;91m卸载\033[0m SWAP"
+        echo -e "\033[1;91m 0.\033[0m 返回"
         echo "==============================================="
         prompt "请选择: " c
         case "$c" in
@@ -1433,23 +1454,28 @@ manage_outbound_policy_menu() {
         cls
         local ystat
         [ "$YOUTUBE_V6" = "1" ] && ystat="\033[1;32m已开启\033[0m" || ystat="\033[1;91m未开启\033[0m"
-        echo -e "\033[1;34m=============== 出站管理（Xray + sing-box）===============\033[0m"
+        echo -e "\033[1;34m========== 出站管理（Xray + Sbox）==========\033[0m"
         echo -e "默认出站: \033[1;36mIPv4\033[0m"
         echo -e "YouTube走IPv6: ${ystat}"
         echo -e "IPv6站点列表: \033[1;36m${V6_SITE_LIST:-（空）}\033[0m"
-        echo "-----------------------------------------------------------"
-        echo -e "\033[1;32m 1.\033[0m 开关\033[1;36mYouTube走IPv6\033[0m"
-        echo -e "\033[1;32m 2.\033[0m 添\033[1;36m加站点\033[0m（逗号分隔）"
-        echo -e "\033[1;32m 3.\033[0m 删\033[1;36m除站点\033[0m"
-        echo -e "\033[1;32m 4.\033[0m 应\033[1;36m用策略\033[0m"
-        echo -e "\033[1;35m 0.\033[0m 返回"
-        echo "==========================================================="
+        echo "-----------------------------------------------"
+        echo -e "\033[1;32m 1.\033[0m \033[1;32m安装\033[0m YouTube IPv6规则"
+        echo -e "\033[1;36m 2.\033[0m \033[1;36m重启\033[0m 规则(添加站点)"
+        echo -e "\033[1;91m 3.\033[0m \033[1;91m卸载\033[0m 规则(删站点)"
+        echo -e "\033[1;36m 4.\033[0m \033[1;36m重启\033[0m 应用到服务"
+        echo -e "\033[1;91m 0.\033[0m 返回"
+        echo "==============================================="
         prompt "请选择: " c
         case "$c" in
             1)
-                if [ "$YOUTUBE_V6" = "1" ]; then YOUTUBE_V6=0; else YOUTUBE_V6=1; fi
+                if [ "$YOUTUBE_V6" = "1" ]; then
+                    YOUTUBE_V6=0
+                    yellow "YouTube IPv6 已关闭"
+                else
+                    YOUTUBE_V6=1
+                    green "YouTube IPv6 已开启"
+                fi
                 save_outbound_policy
-                green "已切换"
                 pause
                 ;;
             2)
@@ -1521,15 +1547,13 @@ xray_menu() {
         fi
 
         echo -e "\033[1;33m=============== Xray 管理 ===============\033[0m"
-        echo -e "Xray: ${x_stat}"
-        echo -e "Argo: ${a_stat}"
+        echo -e "Xray: ${x_stat}    Argo: ${a_stat}"
         echo "-----------------------------------------------"
-        echo -e "\033[1;32m 左列功能\033[0m                         \033[1;36m右列功能\033[0m"
-        echo -e "\033[1;32m 1.\033[0m 安装\033[1;36mArgo\033[0m                        \033[1;32m 6.\033[0m 查看\033[1;36m节点\033[0m"
-        echo -e "\033[1;32m 8.\033[0m 重启\033[1;36mXray\033[0m                        \033[1;32m 5.\033[0m 修改\033[1;36mUUID\033[0m"
-        echo -e "\033[1;32m 7.\033[0m 重启\033[1;36mArgo\033[0m                        \033[1;32m 3.\033[0m \033[1;36mSocks5管理\033[0m"
-        echo -e "\033[1;91m 9.\033[0m 卸载\033[1;36mXray\033[0m                        \033[1;32m 4.\033[0m \033[1;36m免流管理\033[0m"
-        echo -e "\033[1;91m 2.\033[0m 卸载\033[1;36mArgo\033[0m                        \033[1;35m 0.\033[0m 返回\033[1;36m上级\033[0m"
+        echo -e "\033[1;32m 1.\033[0m \033[1;32m安装\033[0m \033[1;35mArgo\033[0m                        \033[1;32m 6.\033[0m 查看\033[1;36m节点\033[0m"
+        echo -e "\033[1;36m 8.\033[0m \033[1;36m重启\033[0m \033[1;36mXray\033[0m                        \033[1;32m 5.\033[0m 修改\033[1;33mUUID\033[0m"
+        echo -e "\033[1;36m 7.\033[0m \033[1;36m重启\033[0m \033[1;35mArgo\033[0m                        \033[1;32m 3.\033[0m \033[1;33mSocks5管理\033[0m"
+        echo -e "\033[1;91m 9.\033[0m \033[1;91m卸载\033[0m \033[1;36mXray\033[0m                        \033[1;32m 4.\033[0m \033[1;33m免流管理\033[0m"
+        echo -e "\033[1;91m 2.\033[0m \033[1;91m卸载\033[0m \033[1;35mArgo\033[0m                        \033[1;91m 0.\033[0m 返回"
         echo "==============================================="
 
         prompt "请选择: " c
@@ -1552,9 +1576,11 @@ xray_menu() {
                 manage_service stop tunnel-argo 2>/dev/null
                 manage_service disable tunnel-argo 2>/dev/null
                 rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
+
                 manage_service stop xray 2>/dev/null
                 manage_service disable xray 2>/dev/null
                 rm -f /etc/init.d/xray /etc/systemd/system/xray.service
+
                 rm -f "$xray_bin" "$xray_conf" "${work_dir}/argo" "$argo_domain_file" "$argo_yml" "$argo_json" "${work_dir}/argo_start.sh" "$freeflow_conf"
                 green "Xray已卸载"
                 pause
@@ -1575,14 +1601,14 @@ singbox_menu() {
             st="\033[1;91m未安装\033[0m"
         fi
 
-        echo -e "\033[1;36m=============== sing-box 管理 ===============\033[0m"
-        echo -e "sing-box: ${st}"
+        echo -e "\033[1;36m=============== Sbox 管理 ===============\033[0m"
+        echo -e "Sbox: ${st}"
         echo "-----------------------------------------------"
-        echo -e "\033[1;32m 1.\033[0m 安装\033[1;36mTuic\033[0m"
-        echo -e "\033[1;32m 2.\033[0m 查看\033[1;36mTuic节点\033[0m"
-        echo -e "\033[1;32m 3.\033[0m 重启\033[1;36msing-box\033[0m"
-        echo -e "\033[1;91m 4.\033[0m 卸载\033[1;36msing-box\033[0m"
-        echo -e "\033[1;35m 0.\033[0m 返回"
+        echo -e "\033[1;32m 1.\033[0m \033[1;32m安装\033[0m Tuic"
+        echo -e "\033[1;32m 2.\033[0m 查看Tuic节点"
+        echo -e "\033[1;36m 3.\033[0m \033[1;36m重启\033[0m Sbox"
+        echo -e "\033[1;91m 4.\033[0m \033[1;91m卸载\033[0m Sbox"
+        echo -e "\033[1;91m 0.\033[0m 返回"
         echo "==============================================="
         prompt "请选择: " c
         case "$c" in
@@ -1638,17 +1664,23 @@ EOF
         touch "$mark"
         green "快捷方式已创建：ssgo"
     else
-        yellow "未能自动识别脚本源路径，快捷方式稍后可手动重建"
+        yellow "未能识别脚本源路径，稍后可手动重建快捷方式"
     fi
 }
 
 bootstrap_fast() {
-    manage_packages jq wget curl iproute2 coreutils >/dev/null 2>&1
+    manage_packages jq wget curl iproute2 coreutils tar unzip openssl >/dev/null 2>&1
     install_shortcut_once
     get_sys_info
     load_restart_hours
     load_outbound_policy
-    load_ip_cache || start_ip_check_bg
+
+    if load_ip_cache; then
+        IP_CACHE_MTIME=$(stat -c %Y "$ip_cache_file" 2>/dev/null || echo 0)
+    else
+        IP_CHECKED=0
+        start_ip_check_bg
+    fi
 }
 
 main_menu() {
@@ -1656,6 +1688,10 @@ main_menu() {
 
     while true; do
         cls
+
+        # 每次刷新尝试读取新缓存，解决“检测中”卡住
+        refresh_ip_cache_if_changed || true
+
         local len4 len6 pad p4 p6 ip4_disp ip6_disp mem_used
         len4=${#WAN4}; len6=${#WAN6}; pad=$(( len4 > len6 ? len4 : len6 ))
         [ -z "$pad" ] && pad=0
@@ -1680,18 +1716,18 @@ main_menu() {
 
         mem_used=$(get_used_mem_display)
 
-        echo -e "OS: \033[1;36m${SYS_INFO_CACHE}\033[0m"
-        echo -e "v4: ${ip4_disp}"
-        echo -e "v6: ${ip6_disp}"
+        echo -e "OS : \033[1;36m${SYS_INFO_CACHE}\033[0m"
+        echo -e "v4 : ${ip4_disp}"
+        echo -e "v6 : ${ip6_disp}"
         echo -e "Mem: \033[1;36m${mem_used}\033[0m"
         echo "-----------------------------------------------"
         echo -e "\033[1;32m 1.\033[0m \033[1;36mXray管理\033[0m"
-        echo -e "\033[1;32m 2.\033[0m \033[1;36msing-box管理\033[0m"
+        echo -e "\033[1;32m 2.\033[0m \033[1;36mSbox管理\033[0m"
         echo -e "\033[1;32m 3.\033[0m \033[1;36m出站管理\033[0m"
         echo -e "\033[1;32m 4.\033[0m \033[1;36m定时重启\033[0m"
-        echo -e "\033[1;32m 5.\033[0m 管理\033[1;36mSWAP\033[0m"
-        echo -e "\033[1;91m 9.\033[0m 彻底\033[1;36m卸载\033[0m"
-        echo -e "\033[1;35m 0.\033[0m 退出"
+        echo -e "\033[1;32m 5.\033[0m \033[1;36mSWAP管理\033[0m"
+        echo -e "\033[1;91m 9.\033[0m \033[1;91m彻底卸载\033[0m"
+        echo -e "\033[1;91m 0.\033[0m 返回/退出"
         echo "==============================================="
 
         prompt "请选择: " c
