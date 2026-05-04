@@ -1042,7 +1042,7 @@ install_tuic_flow() {
     install_singbox_service_if_missing
     start_singbox_and_check || return 1
 
-    printf '%s|%s|%s|%s\n' "$port" "$cc" "$domain" "$uuid" > "$sb_state
+    printf '%s|%s|%s|%s\n' "$port" "$cc" "$domain" "$uuid" > "$sb_state"
     green "Tuic 安装成功"
     return 0
 }
