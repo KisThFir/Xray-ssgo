@@ -815,6 +815,25 @@ show_xray_nodes() {
     echo "=========================================="
 }
 
+show_tuic_node() {
+    cls
+    load_tuic_state
+    [ -f "$sb_state" ] || { yellow "Tuic未安装"; echo "=========================================="; return; }
+
+    local port cc domain uuid
+    IFS='|' read -r port cc domain uuid < "$sb_state"
+
+    [ -z "$port" ] || [ -z "$domain" ] || [ -z "$uuid" ] && { red "Tuic状态文件不完整"; return; }
+
+    local name link
+    name="${NODE_PREFIX}-Tuic"
+    link="tuic://${uuid}:${uuid}@${domain}:${port}?congestion_control=${cc:-bbr}&alpn=h3&sni=${domain}&udp_relay_mode=quic&allow_insecure=0#$(url_encode "$name")"
+
+    green "=============== Tuic 节点 ==============="
+    purple "$link"
+    echo "=========================================="
+}
+
 ensure_acme() {
     if [ -x "$HOME/.acme.sh/acme.sh" ]; then return 0; fi
 
@@ -1028,7 +1047,7 @@ load_tuic_state() {
 install_tuic_flow() {
     install_singbox_core_only || return 1
 
-    local domain token port cc uuid
+    local domain token port cc uuid default_uuid
     prompt "Tuic域名: " domain
     [ -z "$domain" ] && { red "域名不能为空"; return 1; }
 
@@ -1047,10 +1066,13 @@ install_tuic_flow() {
         *) cc="bbr" ;;
     esac
 
+    default_uuid="$(get_current_uuid_xray_or_fallback)"
+    prompt "Tuic UUID(回车默认 ${default_uuid}): " uuid
+    [ -z "$uuid" ] && uuid="$default_uuid"
+
     issue_cert_cf_token "$domain" "$token" || return 1
     ensure_port_open "$port" udp
 
-    uuid=$(generate_uuid)
     write_tuic_config "$domain" "$port" "$cc" "$uuid"
     install_singbox_service_if_missing
     start_singbox_and_check || return 1
@@ -1059,6 +1081,7 @@ install_tuic_flow() {
     green "Tuic 安装成功"
     return 0
 }
+
 
 restart_singbox_menu() {
     if ! service_exists tuic-box; then yellow "sing-box未安装"; return; fi
@@ -1291,20 +1314,25 @@ singbox_menu() {
 sing-box: ${st}
 -----------------------------------------------
 \033[1;32m 1.\033[0m 安装Tuic
+\033[1;32m 3.\033[0m 查看Tuic节点
 \033[1;32m 2.\033[0m 重启sing-box
-\033[1;91m 3.\033[0m 卸载sing-box
+\033[1;91m 4.\033[0m 卸载sing-box
+
 \033[1;35m 0.\033[0m 返回
 ==============================================="
         printf '%b\n' "$text"
 
         prompt "请选择: " c
         case "$c" in
-            1) install_tuic_flow; pause ;;
-            2) restart_singbox_menu; pause ;;
-            3) uninstall_singbox_menu; pause ;;
-            0) return ;;
-            *) red "无效"; pause ;;
-        esac
+    1) install_tuic_flow; pause ;;
+    2) show_tuic_node; pause ;;
+    3) restart_singbox_menu; pause ;;
+    4) uninstall_singbox_menu; pause ;;
+    
+    0) return ;;
+    *) red "无效"; pause ;;
+esac
+
     done
 }
 
