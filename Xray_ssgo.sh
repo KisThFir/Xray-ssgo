@@ -928,6 +928,15 @@ write_tuic_config() {
     "level": "info",
     "timestamp": true
   },
+  "dns": {
+  "servers": [
+    {
+      "type": "udp",
+      "tag": "dns4",
+      "server": "1.1.1.1"
+    }
+  ]
+},
   "inbounds": [
     {
       "type": "tuic",
@@ -952,10 +961,14 @@ write_tuic_config() {
   ],
   "outbounds": [
     {
-      "type": "direct",
-      "tag": "direct_ipv4",
-      "domain_strategy": "ipv4_only"
-    }
+  "type": "direct",
+  "tag": "direct_ipv4",
+  "domain_resolver": {
+    "server": "dns4",
+    "strategy": "ipv4_only"
+  }
+}
+
   ],
   "route": {
     "final": "direct_ipv4"
