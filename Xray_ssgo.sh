@@ -345,10 +345,24 @@ country_code_to_flag() {
     o2=$(printf '%d' "'${cc:1:1}")
     printf "\\U1F1$(printf '%X' $((o1-65+0xE6)))\\U1F1$(printf '%X' $((o2-65+0xE6)))"
 }
+
+# 修复：运营商提取更稳，不再把主名误删成空
 extract_isp_from_org() {
     local org="$1"
-    org="${org#AS[0-9]* }"
-    org=$(echo "$org" | sed -E 's/[, ]*(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|Hosting|Host).*$//i' | sed -E 's/ *$//')
+    [ -z "$org" ] && { echo ""; return; }
+
+    # 去掉开头 ASxxxx
+    org=$(echo "$org" | sed -E 's/^[[:space:]]*AS[0-9]+[[:space:]]+//I')
+
+    # 清理首尾空格/逗号
+    org=$(echo "$org" | sed -E 's/^[[:space:],]+//; s/[[:space:],]+$//')
+
+    # 只去常见公司后缀（末尾），避免砍掉主体
+    org=$(echo "$org" | sed -E 's/[[:space:]]+(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|PLC|Co\.?)$//I')
+
+    # 再次清理
+    org=$(echo "$org" | sed -E 's/^[[:space:],]+//; s/[[:space:],]+$//')
+
     echo "$org"
 }
 extract_asn_from_org() {
@@ -474,24 +488,28 @@ check_system_ip() {
 
     if [ -n "$J4" ] && echo "$J4" | jq -e '.ip' >/dev/null 2>&1; then
         WAN4=$(echo "$J4" | jq -r '.ip // empty')
-        local CC4 ORG4
+        local CC4 ORG4 COMPANY4
         CC4=$(echo "$J4" | jq -r '.country // empty')
         ORG4=$(echo "$J4" | jq -r '.org // empty')
+        COMPANY4=$(echo "$J4" | jq -r '.company.name // empty')
         COUNTRY4=$(country_code_to_zh "$CC4")
         EMOJI4=$(country_code_to_flag "$CC4")
         AS_NUM4=$(extract_asn_from_org "$ORG4")
         ISP_CLEAN4=$(extract_isp_from_org "$ORG4")
+        [ -z "$ISP_CLEAN4" ] && ISP_CLEAN4="$COMPANY4"
     fi
 
     if [ -n "$J6" ] && echo "$J6" | jq -e '.ip' >/dev/null 2>&1; then
         WAN6=$(echo "$J6" | jq -r '.ip // empty')
-        local CC6 ORG6
+        local CC6 ORG6 COMPANY6
         CC6=$(echo "$J6" | jq -r '.country // empty')
         ORG6=$(echo "$J6" | jq -r '.org // empty')
+        COMPANY6=$(echo "$J6" | jq -r '.company.name // empty')
         COUNTRY6=$(country_code_to_zh "$CC6")
         EMOJI6=$(country_code_to_flag "$CC6")
         AS_NUM6=$(extract_asn_from_org "$ORG6")
         ISP_CLEAN6=$(extract_isp_from_org "$ORG6")
+        [ -z "$ISP_CLEAN6" ] && ISP_CLEAN6="$COMPANY6"
     fi
 
     apply_base_name_from_ip
@@ -999,6 +1017,7 @@ uninstall_argo_only() {
     manage_service stop tunnel-argo 2>/dev/null
     manage_service disable tunnel-argo 2>/dev/null
     rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
+    if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
     rm -f "$argo_domain_file" "$argo_yml" "$argo_json" "${work_dir}/argo_start.sh" "${work_dir}/argo"
     if [ -f "$xray_conf" ]; then
         update_config 'del(.inbounds[]? | select(.port==8080 or .port==8081 or .port==8082))'
@@ -1308,6 +1327,7 @@ uninstall_singbox_menu() {
     manage_service stop tuic-box 2>/dev/null
     manage_service disable tuic-box 2>/dev/null
     rm -f /etc/init.d/tuic-box /etc/systemd/system/tuic-box.service
+    if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
     rm -rf "$SB_BASE"
     green "Sbox 已卸载"
 }
@@ -1453,7 +1473,7 @@ manage_outbound_policy_menu() {
         echo -e "\033[1;32m 1.\033[0m \033[1;32m开启\033[0m${C_OUTBOUND}YouTube IPv6出站${C_RST}"
         echo -e "\033[1;36m 2.\033[0m \033[1;36m添加\033[0m${C_OUTBOUND}IPv6出站规则${C_RST}"
         echo -e "\033[1;91m 3.\033[0m \033[1;91m删除\033[0m${C_OUTBOUND}IPv6出站规则${C_RST}"
-        echo -e "\033[1;33m 4.\033[0m \033[1;33m重启\033[0m服务应用规则"
+        echo -e "${C_BAD} 4.${C_RST} ${C_BAD}重启${C_RST}${C_OUTBOUND}服务应用规则${C_RST}"
         echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
         echo "==============================================="
         prompt "请选择: " c
@@ -1556,9 +1576,13 @@ xray_menu() {
                 manage_service stop tunnel-argo 2>/dev/null
                 manage_service disable tunnel-argo 2>/dev/null
                 rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
+                if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
+
                 manage_service stop xray 2>/dev/null
                 manage_service disable xray 2>/dev/null
                 rm -f /etc/init.d/xray /etc/systemd/system/xray.service
+                if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
+
                 rm -f "$xray_bin" "$xray_conf" "${work_dir}/argo" "$argo_domain_file" "$argo_yml" "$argo_json" "${work_dir}/argo_start.sh" "$freeflow_conf"
                 green "Xray已卸载"
                 pause
@@ -1613,8 +1637,17 @@ full_uninstall() {
     manage_service disable tuic-box 2>/dev/null
     rm -f /etc/init.d/tuic-box /etc/systemd/system/tuic-box.service
 
+    # systemd 刷新
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl reset-failed >/dev/null 2>&1 || true
+    fi
+
     command -v crontab >/dev/null 2>&1 && (crontab -l 2>/dev/null | sed '/#svc-restart-all/d') | crontab - 2>/dev/null
     swap_disable_all >/dev/null 2>&1 || true
+
+    # 删除快捷方式
+    rm -f /usr/local/bin/ssgo /usr/bin/ssgo
 
     rm -rf "$work_dir" "$SB_BASE" "$tls_dir"
     green "已彻底卸载"
@@ -1702,10 +1735,10 @@ main_menu() {
         echo -e "v6 : ${ip6_disp}"
         echo -e "Mem: \033[1;36m${mem_used}\033[0m"
         echo "-----------------------------------------------"
-        echo -e "${C_MANAGE} 1.${C_RST} ${C_MANAGE}管理 Xray${C_RST}           ${C_MANAGE} 5.${C_RST} ${C_MANAGE}管理${C_RST}${C_SWAP} SWAP${C_RST}"
-        echo -e "${C_MANAGE} 2.${C_RST} ${C_MANAGE}管理${C_RST}${C_SBOX} Sbox${C_RST}           ${C_INSTALL} 6.${C_RST} ${C_INSTALL}创建${C_RST}${C_SHORTCUT} 快捷${C_RST}"
-        echo -e "${C_MANAGE} 3.${C_RST} ${C_MANAGE}管理${C_RST}${C_OUTBOUND} 出站${C_RST}${C_POLICY} 策略${C_RST}     ${C_BAD} 9.${C_RST} ${C_BAD}彻底 卸载${C_RST}"
-        echo -e "${C_RESTART} 4.${C_RST} ${C_RESTART}定时 重启${C_RST}           ${C_BAD} 0.${C_RST} ${C_BAD}退出${C_RST}"
+        echo -e "${C_MANAGE} 1.${C_RST} ${C_MANAGE}管理Xray${C_RST}           ${C_MANAGE} 5.${C_RST} ${C_MANAGE}管理${C_RST}${C_SWAP}SWAP${C_RST}"
+        echo -e "${C_MANAGE} 2.${C_RST} ${C_MANAGE}管理${C_RST}${C_SBOX}Sbox${C_RST}           ${C_INSTALL} 6.${C_RST} ${C_INSTALL}创建${C_RST}${C_SHORTCUT}快捷${C_RST}"
+        echo -e "${C_MANAGE} 3.${C_RST} ${C_MANAGE}管理出站${C_RST}${C_POLICY}策略${C_RST}         ${C_BAD} 9.${C_RST} ${C_BAD}彻底卸载${C_RST}"
+        echo -e "${C_MANAGE} 4.${C_RST} ${C_MANAGE}定时重启${C_RST}           ${C_BAD} 0.${C_RST} ${C_BAD}退出${C_RST}"
         echo "==============================================="
 
         prompt "请选择: " c
