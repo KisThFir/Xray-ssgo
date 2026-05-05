@@ -397,13 +397,19 @@ check_ip(){
   IF6="$(ip -6 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
 
   if [ -n "$IF4" ]; then
-    L4="$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | head -n1 | cut -d/ -f1 || true)"
-    [ -n "$L4" ] && BA4="--bind-address=$L4"
-  fi
+  local L4
+  L4=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+  [ -z "$L4" ] && L4=$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1)
+  [ -n "$L4" ] && BA4="--bind-address=$L4"
+fi
+
   if [ -n "$IF6" ]; then
-    L6="$(ip -6 addr show "$IF6" 2>/dev/null | awk '/inet6 / && /global/ {print $2}' | head -n1 | cut -d/ -f1 || true)"
-    [ -n "$L6" ] && BA6="--bind-address=$L6"
-  fi
+  local L6
+  L6=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+  
+  [ -z "$L6" ] && L6=$(ip -6 addr show "$IF6" 2>/dev/null | awk '/inet6 / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1)
+  [ -n "$L6" ] && BA6="--bind-address=$L6"
+fi
 
   local t4 t6 j4="" j6=""
   t4="$(mktemp 2>/dev/null || echo /tmp/ip4.$$)"
