@@ -289,69 +289,150 @@ apply_base_name(){
   [ -n "$isp" ] && BASE_FULL="${BASE_REGION} ${isp}" || BASE_FULL="$BASE_REGION"
 }
 
-# -------- IPv6 检测修复（绑定默认路由网卡源地址）--------
-check_ip(){
-  [ "$IP_CHECKED" = "1" ] && return
-
-  local IF4 IF6 BA4="" BA6=""
-  IF4=$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
-  IF6=$(ip -6 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
-
-  if [ -n "$IF4" ]; then
-    local L4
-    L4=$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | head -n1 | cut -d/ -f1)
-    [ -n "$L4" ] && BA4="--bind-address=$L4"
+# -------- IPv4/IPv6 检测（增强：多源+回退，NAT环境更稳）--------
+get_ip_json_via_curl(){
+  local fam="$1" extra="$2" url="$3"
+  if [ "$fam" = "4" ]; then
+    curl -4 -fsSL --connect-timeout 4 --max-time 8 $extra "$url" 2>/dev/null || true
+  else
+    curl -6 -fsSL --connect-timeout 5 --max-time 10 $extra "$url" 2>/dev/null || true
   fi
-
-  if [ -n "$IF6" ]; then
-    local L6
-    L6=$(ip -6 addr show "$IF6" 2>/dev/null | awk '/inet6 / && /global/ {print $2}' | head -n1 | cut -d/ -f1)
-    [ -n "$L6" ] && BA6="--bind-address=$L6"
+}
+get_ip_json_via_wget(){
+  local fam="$1" extra="$2" url="$3"
+  if [ "$fam" = "4" ]; then
+    wget -4 -qO- --no-check-certificate --tries=1 --timeout=6 $extra "$url" 2>/dev/null || true
+  else
+    wget -6 -qO- --no-check-certificate --tries=1 --timeout=8 $extra "$url" 2>/dev/null || true
   fi
+}
+is_valid_ip_json(){
+  local j="$1" fam="$2"
+  [ -n "$j" ] || return 1
+  echo "$j" | jq -e '.ip' >/dev/null 2>&1 || return 1
+  local ip
+  ip="$(echo "$j" | jq -r '.ip // empty')"
+  [ -n "$ip" ] || return 1
+  if [ "$fam" = "6" ]; then
+    [[ "$ip" == *:* ]] || return 1
+  else
+    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  fi
+  return 0
+}
+extract_ip_fields(){
+  local json="$1" fam="$2"
+  local cc org comp host ip
+  ip="$(echo "$json" | jq -r '.ip // empty')"
+  cc="$(echo "$json" | jq -r '.country // empty')"
+  org="$(echo "$json" | jq -r '.org // empty')"
+  comp="$(echo "$json" | jq -r '.company.name // empty')"
+  host="$(echo "$json" | jq -r '.hostname // empty')"
 
-  local t4 t6 j4 j6
-  t4="$(mktemp)"; t6="$(mktemp)"
-
-  wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=5 "https://ipinfo.io/json" > "$t4" 2>/dev/null &
-  local p4=$!
-  wget $BA6 -6 -qO- --no-check-certificate --tries=2 --timeout=5 "https://ipinfo.io/json" > "$t6" 2>/dev/null &
-  local p6=$!
-
-  wait "$p4" 2>/dev/null || true
-  wait "$p6" 2>/dev/null || true
-
-  j4="$(cat "$t4" 2>/dev/null || true)"
-  j6="$(cat "$t6" 2>/dev/null || true)"
-  rm -f "$t4" "$t6"
-
-  if [ -n "$j4" ] && echo "$j4" | jq -e '.ip' >/dev/null 2>&1; then
-    WAN4="$(echo "$j4" | jq -r '.ip // empty')"
-    local cc org comp host
-    cc="$(echo "$j4" | jq -r '.country // empty')"
-    org="$(echo "$j4" | jq -r '.org // empty')"
-    comp="$(echo "$j4" | jq -r '.company.name // empty')"
-    host="$(echo "$j4" | jq -r '.hostname // empty')"
+  if [ "$fam" = "4" ]; then
+    WAN4="$ip"
     COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
     EMOJI4="$(country_flag "$cc")"
     ISP4="$(clean_isp "$org")"
     [ -z "$ISP4" ] && ISP4="$comp"
     [ -z "$ISP4" ] && ISP4="$host"
     [ -z "$ISP4" ] && ISP4="unknown"
-  fi
-
-  if [ -n "$j6" ] && echo "$j6" | jq -e '.ip' >/dev/null 2>&1; then
-    WAN6="$(echo "$j6" | jq -r '.ip // empty')"
-    local cc org comp host
-    cc="$(echo "$j6" | jq -r '.country // empty')"
-    org="$(echo "$j6" | jq -r '.org // empty')"
-    comp="$(echo "$j6" | jq -r '.company.name // empty')"
-    host="$(echo "$j6" | jq -r '.hostname // empty')"
+  else
+    WAN6="$ip"
     COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
     EMOJI6="$(country_flag "$cc")"
     ISP6="$(clean_isp "$org")"
     [ -z "$ISP6" ] && ISP6="$comp"
     [ -z "$ISP6" ] && ISP6="$host"
     [ -z "$ISP6" ] && ISP6="unknown"
+  fi
+}
+probe_ip_family(){
+  local fam="$1"
+  local ifn src extra j url
+
+  # 优先：不绑定（对部分NAT/策略路由环境更友好）
+  for url in \
+    "https://ipinfo.io/json" \
+    "https://api.ip.sb/geoip" \
+    "https://api.my-ip.io/v2/ip.json"
+  do
+    j="$(get_ip_json_via_curl "$fam" "" "$url")"
+    if is_valid_ip_json "$j" "$fam"; then
+      echo "$j"; return 0
+    fi
+  done
+
+  # 回退：wget 不绑定
+  for url in \
+    "https://ipinfo.io/json" \
+    "https://api.ip.sb/geoip" \
+    "https://api.my-ip.io/v2/ip.json"
+  do
+    j="$(get_ip_json_via_wget "$fam" "" "$url")"
+    if is_valid_ip_json "$j" "$fam"; then
+      echo "$j"; return 0
+    fi
+  done
+
+  # 再尝试：绑定默认路由接口的源地址/接口
+  if [ "$fam" = "4" ]; then
+    ifn="$(ip -4 route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+    [ -n "$ifn" ] && src="$(ip -4 addr show "$ifn" 2>/dev/null | awk '/inet / && /global/ {print $2}' | head -n1 | cut -d/ -f1)" || src=""
+    extra=""
+    [ -n "$src" ] && extra="--interface ${src}"
+    [ -z "$extra" ] && [ -n "$ifn" ] && extra="--interface ${ifn}"
+  else
+    ifn="$(ip -6 route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+    [ -n "$ifn" ] && src="$(ip -6 addr show "$ifn" 2>/dev/null | awk '/inet6 / && /global/ {print $2}' | head -n1 | cut -d/ -f1)" || src=""
+    extra=""
+    [ -n "$src" ] && extra="--interface ${src}"
+    [ -z "$extra" ] && [ -n "$ifn" ] && extra="--interface ${ifn}"
+  fi
+
+  if [ -n "$extra" ]; then
+    for url in \
+      "https://ipinfo.io/json" \
+      "https://api.ip.sb/geoip" \
+      "https://api.my-ip.io/v2/ip.json"
+    do
+      j="$(get_ip_json_via_curl "$fam" "$extra" "$url")"
+      if is_valid_ip_json "$j" "$fam"; then
+        echo "$j"; return 0
+      fi
+    done
+    for url in \
+      "https://ipinfo.io/json" \
+      "https://api.ip.sb/geoip" \
+      "https://api.my-ip.io/v2/ip.json"
+    do
+      j="$(get_ip_json_via_wget "$fam" "$extra" "$url")"
+      if is_valid_ip_json "$j" "$fam"; then
+        echo "$j"; return 0
+      fi
+    done
+  fi
+
+  return 1
+}
+
+check_ip(){
+  [ "$IP_CHECKED" = "1" ] && return
+
+  WAN4=""; WAN6=""
+  COUNTRY4=""; COUNTRY6=""
+  ISP4=""; ISP6=""
+  EMOJI4=""; EMOJI6=""
+
+  local j4 j6
+  j4="$(probe_ip_family 4 || true)"
+  j6="$(probe_ip_family 6 || true)"
+
+  if is_valid_ip_json "$j4" 4; then
+    extract_ip_fields "$j4" 4
+  fi
+  if is_valid_ip_json "$j6" 6; then
+    extract_ip_fields "$j6" 6
   fi
 
   apply_base_name
@@ -1346,19 +1427,29 @@ main_menu(){
     info="$(sys_info)"
     mem="$(mem_used_disp)"
 
-    if [ -n "$WAN4" ]; then u4="\033[1;36m${WAN4}  (${COUNTRY4} ${ISP4})\033[0m"; else u4="${C_BAD}未配置${C_RST}"; fi
-    if [ -n "$WAN6" ]; then u6="\033[1;36m${WAN6}  (${COUNTRY6} ${ISP6})\033[0m"; else u6="${C_BAD}未配置${C_RST}"; fi
+    if [ -n "$WAN4" ]; then
+      u4="\033[1;36m${WAN4}  (${COUNTRY4} ${ISP4})\033[0m"
+    else
+      u4="${C_BAD}未检出${C_RST}"
+    fi
+
+    if [ -n "$WAN6" ]; then
+      u6="\033[1;36m${WAN6}  (${COUNTRY6} ${ISP6})\033[0m"
+    else
+      u6="${C_BAD}未检出${C_RST}"
+    fi
 
     echo -e "OS : \033[1;36m${info}\033[0m"
     echo -e "v4 : ${u4}"
     echo -e "v6 : ${u6}"
     echo -e "Mem: \033[1;36m${mem}\033[0m"
     echo "-----------------------------------------------"
-    
-    printf "%b\n" "${C_MANAGE} 1.${C_RST} 管理${C_MANAGE}Xray${C_RST}           ${C_MANAGE} 5.${C_RST} 管理${C_SWAP}SWAP${C_RST}"
-    printf "%b\n" "${C_MANAGE} 2.${C_RST} 管理${C_SBOX}Sbox${C_RST}           ${C_INSTALL} 6.${C_RST} 创建${C_SHORTCUT}快捷${C_RST}"
-    printf "%b\n" "${C_MANAGE} 3.${C_RST} 管理${C_MANAGE}出站${C_RST}           ${C_BAD} 9.${C_RST} ${C_BAD}彻底卸载${C_RST}"
-    printf "%b\n" "${C_MANAGE} 4.${C_RST} 定时${C_MANAGE}重启${C_RST}           ${C_BAD} 0.${C_RST} ${C_BAD}退出${C_RST}"
+
+    # 首页颜色：管理/定时/创建 = 跟数字同色；xray=绿色；出站/重启=黄色
+    printf "%b\n" "${C_MANAGE} 1. 管理${C_RST}${C_XRAY}Xray${C_RST}           ${C_MANAGE} 5. 管理${C_RST}${C_SWAP}SWAP${C_RST}"
+    printf "%b\n" "${C_MANAGE} 2. 管理${C_RST}${C_SBOX}Sbox${C_RST}           ${C_MANAGE} 6. 创建${C_RST}${C_SHORTCUT}快捷${C_RST}"
+    printf "%b\n" "${C_MANAGE} 3. 管理${C_RST}${C_OUTBOUND}出站${C_RST}           ${C_MANAGE} 9.${C_RST} ${C_BAD}彻底卸载${C_RST}"
+    printf "%b\n" "${C_MANAGE} 4. 定时${C_RST}${C_RESTART}重启${C_RST}           ${C_BAD} 0.${C_RST} ${C_BAD}退出${C_RST}"
 
     echo "==============================================="
     prompt "请选择: " c
