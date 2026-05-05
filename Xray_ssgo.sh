@@ -627,7 +627,7 @@ apply_policy_sbox(){
       .dns = (.dns // {})
       | .dns.rules = [{"domain_suffix":$d,"server":"dns_cf"}]
       | .route = (.route // {})
-      | .route.rules = [{"domain":$d,"outbound":"direct_ipv6"}]
+      | .route.rules = [{"domain_suffix": $d, "outbound":"direct_ipv6"}]
       | .route.final = "direct_ipv4"
     ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
   else
@@ -1082,7 +1082,7 @@ write_tuic_conf(){
 
   if [ "$(echo "$v6_arr" | jq 'length')" -gt 0 ]; then
     dns_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain_suffix":$d,"server":"dns_cf"}]')"
-    route_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain":$d,"outbound":"direct_ipv6"}]')"
+    route_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain_suffix": $d, "outbound":"direct_ipv6"}]')"
   else
     dns_rules_json='[]'
     route_rules_json='[]'
