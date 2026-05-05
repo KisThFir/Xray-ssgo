@@ -574,13 +574,27 @@ EOF
 }
 
 # ========== Outbound ==========
+normalize_domain_item(){
+  local s="$1"
+  s="${s#http://}"; s="${s#https://}"
+  s="${s%%/*}"; s="${s%%:*}"
+  s="$(echo "$s" | tr '[:upper:]' '[:lower:]' | sed 's/^ *//;s/ *$//;s/^\.*//')"
+  echo "$s"
+}
+
 build_v6_domains_json(){
-  local d=""
+  local d="" raw_arr=() clean_arr=() item
   [ "$YOUTUBE_V6" = "1" ] && d="youtube.com,youtu.be,googlevideo.com,ytimg.com"
   if [ -n "$V6_SITE_LIST" ]; then
     [ -n "$d" ] && d="${d},${V6_SITE_LIST}" || d="$V6_SITE_LIST"
   fi
-  jq -nc --arg s "$d" '($s|split(",")|map(gsub("^\\s+|\\s+$";""))|map(select(length>0))|unique)'
+  IFS=',' read -r -a raw_arr <<< "$d"
+  for item in "${raw_arr[@]}"; do
+    item="$(normalize_domain_item "$item")"
+    [ -z "$item" ] && continue
+    clean_arr+=("$item")
+  done
+  printf '%s\n' "${clean_arr[@]}" | awk 'NF' | sort -u | jq -Rsc 'split("\n")|map(select(length>0))'
 }
 
 apply_policy_xray(){
@@ -600,12 +614,16 @@ apply_policy_xray(){
   fi
 }
 
-# v1.13.11 兼容：不使用 dns.rules[].tag / route.rules[].tag
+# v1.13.11 兼容严格策略:
+# - match 域名后，先拒绝 IPv4 回落，再路由 direct_ipv6
+# - 首条 sniff
 apply_policy_sbox(){
   [ -f "$SB_CONF" ] || return 0
+
   local arr
   arr="$(build_v6_domains_json)"
 
+  # 1) 确保 outbounds 存在 direct_ipv4 / direct_ipv6（保留其它 outbound）
   jq '
     .outbounds |= (
       map(select(.tag!="direct_ipv4" and .tag!="direct_ipv6"))
@@ -622,12 +640,17 @@ apply_policy_sbox(){
     )
   ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
 
+  # 2) 重建 route / dns（严格模式）
   if [ "$(echo "$arr" | jq 'length')" -gt 0 ]; then
     jq --argjson d "$arr" '
       .dns = (.dns // {})
       | .dns.rules = [{"domain_suffix":$d,"server":"dns_cf"}]
       | .route = (.route // {})
-      | .route.rules = [{"domain_suffix": $d, "outbound":"direct_ipv6"}]
+      | .route.rules = [
+          {"action":"sniff"},
+          {"domain_suffix":$d,"ip_version":4,"action":"reject","method":"default"},
+          {"domain_suffix":$d,"action":"route","outbound":"direct_ipv6"}
+        ]
       | .route.final = "direct_ipv4"
     ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
   else
@@ -635,7 +658,7 @@ apply_policy_sbox(){
       .dns = (.dns // {})
       | .dns.rules = []
       | .route = (.route // {})
-      | .route.rules = []
+      | .route.rules = [{"action":"sniff"}]
       | .route.final = "direct_ipv4"
     ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
   fi
@@ -1082,10 +1105,14 @@ write_tuic_conf(){
 
   if [ "$(echo "$v6_arr" | jq 'length')" -gt 0 ]; then
     dns_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain_suffix":$d,"server":"dns_cf"}]')"
-    route_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain_suffix": $d, "outbound":"direct_ipv6"}]')"
+    route_rules_json="$(jq -nc --argjson d "$v6_arr" '[
+      {"action":"sniff"},
+      {"domain_suffix":$d,"ip_version":4,"action":"reject","method":"default"},
+      {"domain_suffix":$d,"action":"route","outbound":"direct_ipv6"}
+    ]')"
   else
     dns_rules_json='[]'
-    route_rules_json='[]'
+    route_rules_json='[{"action":"sniff"}]'
   fi
 
   cat > "$SB_CONF" <<EOF
@@ -1125,16 +1152,62 @@ write_tuic_conf(){
 EOF
 }
 
+# 修复版 OpenRC 脚本（stop/restart 更干净）
 ensure_tuic_service(){
   if service_exists tuic-box; then return; fi
   if is_alpine; then
     cat > /etc/init.d/tuic-box <<EOF
 #!/sbin/openrc-run
+
+name="tuic-box"
 description="Tuic by sing-box"
-command="${SB_BIN}"
-command_args="run -c ${SB_CONF}"
-command_background=true
-pidfile="/var/run/tuic-box.pid"
+
+SINGBOX_BIN="${SB_BIN}"
+SINGBOX_CFG="${SB_CONF}"
+PIDFILE="/run/\${RC_SVCNAME}.pid"
+
+command="\${SINGBOX_BIN}"
+command_args="run -c \${SINGBOX_CFG}"
+command_background="yes"
+pidfile="\${PIDFILE}"
+
+depend() {
+  need net
+  use dns logger
+  after firewall
+}
+
+start_pre() {
+  checkpath --directory --mode 0755 /run
+  [ -x "\${SINGBOX_BIN}" ] || { eerror "binary not found: \${SINGBOX_BIN}"; return 1; }
+  [ -f "\${SINGBOX_CFG}" ] || { eerror "config not found: \${SINGBOX_CFG}"; return 1; }
+
+  ebegin "Checking sing-box config"
+  "\${SINGBOX_BIN}" check -c "\${SINGBOX_CFG}" >/dev/null 2>&1
+  eend \$? "Config check failed"
+}
+
+stop() {
+  ebegin "Stopping \${RC_SVCNAME}"
+
+  if [ -f "\${PIDFILE}" ]; then
+    start-stop-daemon --stop --pidfile "\${PIDFILE}" --retry TERM/20/KILL/5 >/dev/null 2>&1 || true
+  fi
+
+  # fallback: 防 pidfile 丢失/错乱
+  pkill -f "^\${SINGBOX_BIN} run -c \${SINGBOX_CFG}\$" >/dev/null 2>&1 || true
+  pkill -x sing-box >/dev/null 2>&1 || true
+
+  rm -f "\${PIDFILE}"
+
+  if pgrep -f "^\${SINGBOX_BIN} run -c \${SINGBOX_CFG}\$" >/dev/null 2>&1; then
+    eend 1 "Process still alive"
+    return 1
+  fi
+
+  eend 0
+  return 0
+}
 EOF
     chmod +x /etc/init.d/tuic-box
   else
@@ -1216,6 +1289,54 @@ uninstall_tuic(){
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
   rm -rf "$SB"
   green "Sbox 已卸载"
+}
+
+# 新增：前台查看 sing-box 日志（Ctrl+C 后恢复后台）
+foreground_sbox_log(){
+  [ -x "$SB_BIN" ] || { red "sing-box 未安装"; pause; return 1; }
+  [ -f "$SB_CONF" ] || { red "缺少配置: $SB_CONF"; pause; return 1; }
+
+  if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check_fg.log 2>&1; then
+    red "配置校验失败，无法前台运行"
+    tail -n 80 /tmp/sb_check_fg.log 2>/dev/null || true
+    pause
+    return 1
+  fi
+
+  yellow "即将停止 tuic-box 后台服务并前台输出日志..."
+  svc stop tuic-box || true
+  pkill -f "^${SB_BIN} run -c ${SB_CONF}$" >/dev/null 2>&1 || true
+  pkill -x sing-box >/dev/null 2>&1 || true
+  sleep 1
+
+  green "前台日志已启动（Ctrl+C 退出）"
+  echo "日志文件: /tmp/sb-live.log"
+
+  # 关键：临时覆盖全局 INT trap，避免 Ctrl+C 直接退出整个管理脚本
+  local old_int_trap
+  old_int_trap="$(trap -p INT || true)"
+  trap ':' INT
+
+  set +e
+  "$SB_BIN" run -c "$SB_CONF" 2>&1 | tee /tmp/sb-live.log
+  set -e
+
+  # 恢复原 INT trap
+  if [ -n "$old_int_trap" ]; then
+    eval "$old_int_trap"
+  else
+    trap - INT
+  fi
+
+  yellow "已退出前台日志，正在恢复后台服务..."
+  svc start tuic-box || true
+  sleep 1
+  if is_running tuic-box; then
+    green "tuic-box 已恢复后台运行"
+  else
+    red "tuic-box 恢复失败，请手动检查"
+  fi
+  pause
 }
 
 # ========== Restart Cron ==========
@@ -1490,6 +1611,7 @@ sbox_menu(){
     echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_TUIC}Tuic${C_RST}"
     echo -e "${C_VIEW} 2.${C_RST} ${C_VIEW}查看${C_RST}${C_NODE}节点${C_RST}"
     echo -e "${C_RESTART} 3.${C_RST} ${C_RESTART}重启${C_RST}${C_TUIC}Tuic${C_RST}"
+    echo -e "${C_RESTART} 5.${C_RST} ${C_VIEW}实时${C_RST}${C_RESTART}日志${C_RST}"
     echo -e "${C_BAD} 4.${C_RST} ${C_BAD}卸载${C_RST}${C_TUIC}Tuic${C_RST}"
     echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
     echo "==============================================="
@@ -1499,6 +1621,7 @@ sbox_menu(){
       2) show_tuic_node; pause ;;
       3) service_exists tuic-box && start_tuic_check && green "Tuic已重启" || red "Tuic未安装"; pause ;;
       4) uninstall_tuic; pause ;;
+      5) foreground_sbox_log ;;
       0) return ;;
       *) red "无效"; pause ;;
     esac
