@@ -288,12 +288,38 @@ apply_base_name(){
   fi
   [ -n "$isp" ] && BASE_FULL="${BASE_REGION} ${isp}" || BASE_FULL="$BASE_REGION"
 }
+
+# -------- IPv6 检测修复（绑定默认路由网卡源地址）--------
 check_ip(){
   [ "$IP_CHECKED" = "1" ] && return
+
+  local IF4 IF6 BA4="" BA6=""
+  IF4=$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+  IF6=$(ip -6 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+
+  if [ -n "$IF4" ]; then
+    local L4
+    L4=$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | head -n1 | cut -d/ -f1)
+    [ -n "$L4" ] && BA4="--bind-address=$L4"
+  fi
+
+  if [ -n "$IF6" ]; then
+    local L6
+    L6=$(ip -6 addr show "$IF6" 2>/dev/null | awk '/inet6 / && /global/ {print $2}' | head -n1 | cut -d/ -f1)
+    [ -n "$L6" ] && BA6="--bind-address=$L6"
+  fi
+
   local t4 t6 j4 j6
   t4="$(mktemp)"; t6="$(mktemp)"
-  wget -4 -qO- --no-check-certificate --tries=2 --timeout=4 "https://ipinfo.io/json" > "$t4" 2>/dev/null || true
-  wget -6 -qO- --no-check-certificate --tries=2 --timeout=4 "https://ipinfo.io/json" > "$t6" 2>/dev/null || true
+
+  wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=5 "https://ipinfo.io/json" > "$t4" 2>/dev/null &
+  local p4=$!
+  wget $BA6 -6 -qO- --no-check-certificate --tries=2 --timeout=5 "https://ipinfo.io/json" > "$t6" 2>/dev/null &
+  local p6=$!
+
+  wait "$p4" 2>/dev/null || true
+  wait "$p6" 2>/dev/null || true
+
   j4="$(cat "$t4" 2>/dev/null || true)"
   j6="$(cat "$t6" 2>/dev/null || true)"
   rm -f "$t4" "$t6"
@@ -1329,10 +1355,10 @@ main_menu(){
     echo -e "Mem: \033[1;36m${mem}\033[0m"
     echo "-----------------------------------------------"
     
-    printf "%b\n" "${C_MANAGE} 1.${C_RST} ${C_MANAGE}管理Xray${C_RST}           ${C_MANAGE} 5.${C_RST} ${C_MANAGE}管理${C_RST}${C_SWAP}SWAP${C_RST}"
-    printf "%b\n" "${C_MANAGE} 2.${C_RST} ${C_MANAGE}管理${C_RST}${C_SBOX}Sbox${C_RST}           ${C_INSTALL} 6.${C_RST} ${C_INSTALL}创建${C_RST}${C_SHORTCUT}快捷${C_RST}"
-    printf "%b\n" "${C_MANAGE} 3.${C_RST} ${C_MANAGE}管理出站${C_RST}           ${C_BAD} 9.${C_RST} ${C_BAD}彻底卸载${C_RST}"
-    printf "%b\n" "${C_MANAGE} 4.${C_RST} ${C_MANAGE}定时重启${C_RST}           ${C_BAD} 0.${C_RST} ${C_BAD}退出${C_RST}"
+    printf "%b\n" "${C_MANAGE} 1.${C_RST} 管理${C_MANAGE}Xray${C_RST}           ${C_MANAGE} 5.${C_RST} 管理${C_SWAP}SWAP${C_RST}"
+    printf "%b\n" "${C_MANAGE} 2.${C_RST} 管理${C_SBOX}Sbox${C_RST}           ${C_INSTALL} 6.${C_RST} 创建${C_SHORTCUT}快捷${C_RST}"
+    printf "%b\n" "${C_MANAGE} 3.${C_RST} 管理${C_MANAGE}出站${C_RST}           ${C_BAD} 9.${C_RST} ${C_BAD}彻底卸载${C_RST}"
+    printf "%b\n" "${C_MANAGE} 4.${C_RST} 定时${C_MANAGE}重启${C_RST}           ${C_BAD} 0.${C_RST} ${C_BAD}退出${C_RST}"
 
     echo "==============================================="
     prompt "请选择: " c
