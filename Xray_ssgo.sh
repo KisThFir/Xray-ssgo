@@ -7,29 +7,29 @@ yellow() { printf '\033[1;33m%s\033[0m\n' "$1"; }
 purple() { printf '\033[1;35m%s\033[0m\n' "$1"; }
 skyblue(){ printf '\033[1;36m%s\033[0m\n' "$1"; }
 
-# 语义色（按你的要求）
-c_install="\033[1;36m"     # 安装（青）
-c_modify="\033[1;36m"      # 修改（青）
-c_view="\033[1;36m"        # 查看（青）
-c_manage="\033[1;36m"      # 管理（青）
+# ========= 语义颜色 =========
+C_RST="\033[0m"
+C_INSTALL="\033[1;36m"   # 安装
+C_MODIFY="\033[1;36m"    # 修改
+C_VIEW="\033[1;36m"      # 查看
+C_MANAGE="\033[1;36m"    # 管理
+C_RESTART="\033[1;33m"   # 重启
 
-c_restart="\033[1;33m"     # 重启（黄）
-c_tuic="\033[1;33m"        # Tuic（黄）
-c_swap="\033[1;33m"        # SWAP（黄）
-c_outbound="\033[1;33m"    # 出站（黄）
-c_freeflow="\033[1;33m"    # 免流（黄）
-c_socks5="\033[1;33m"      # Socks5（黄）
-c_uuid="\033[1;33m"        # UUID（黄）
+C_XRAY="\033[1;32m"      # xray
+C_ARGO="\033[1;35m"      # argo
+C_NODE="\033[1;35m"      # 节点
+C_TUIC="\033[1;35m"      # tuic
+C_SBOX="\033[1;35m"      # sbox
+C_POLICY="\033[1;35m"    # 策略
+C_SHORTCUT="\033[1;35m"  # 快捷
 
-c_uninstalled="\033[1;91m" # 未安装（红）
-c_unconfigured="\033[1;91m"# 未配置（红）
-c_back="\033[1;91m"        # 返回（红）
+C_OUTBOUND="\033[1;33m"  # 出站
+C_FREEFLOW="\033[1;33m"  # 免流
+C_SOCKS5="\033[1;33m"    # socks5
+C_UUID="\033[1;33m"      # uuid
+C_SWAP="\033[1;33m"      # swap
 
-c_xray="\033[1;32m"        # xray（绿）
-c_node="\033[1;35m"        # 节点（紫）
-c_argo="\033[1;35m"        # Argo（紫）
-
-c_reset="\033[0m"
+C_BAD="\033[1;91m"       # 未安装/未配置/未启动/返回/退出
 
 clear_buffer() { while read -r -t 0.1 -n 10000 _d </dev/tty 2>/dev/null; do :; done; }
 prompt() { clear_buffer; printf '\033[1;91m%s\033[0m' "$1" >&2; read -r "$2" </dev/tty; }
@@ -79,9 +79,8 @@ WAN4="" WAN6=""
 COUNTRY4="" AS_NUM4="" ISP_CLEAN4="" EMOJI4=""
 COUNTRY6="" AS_NUM6="" ISP_CLEAN6="" EMOJI6=""
 
-# 基础命名信息
-BASE_REGION_NAME="Node"     # e.g. 🇺🇸 [美国]
-BASE_FULL_NAME="Node"       # e.g. 🇺🇸 [美国] Alice
+BASE_REGION_NAME="Node"
+BASE_FULL_NAME="Node"
 
 [ "$EUID" -ne 0 ] && red "请用 root 运行" && exit 1
 [ -t 0 ] || { red "请在交互终端运行"; exit 1; }
@@ -318,9 +317,49 @@ get_sys_info() {
     SYS_INFO_CACHE="${os_ver} | ${kernel} | ${virt} | ${mem} | ${disk}"
 }
 
+country_code_to_zh() {
+    case "$1" in
+        US) echo "美国" ;;
+        HK) echo "香港" ;;
+        JP) echo "日本" ;;
+        SG) echo "新加坡" ;;
+        KR) echo "韩国" ;;
+        TW) echo "台湾" ;;
+        DE) echo "德国" ;;
+        FR) echo "法国" ;;
+        GB) echo "英国" ;;
+        CA) echo "加拿大" ;;
+        AU) echo "澳大利亚" ;;
+        NL) echo "荷兰" ;;
+        RU) echo "俄罗斯" ;;
+        IN) echo "印度" ;;
+        BR) echo "巴西" ;;
+        *) echo "$1" ;;
+    esac
+}
+country_code_to_flag() {
+    local cc="${1^^}"
+    [ ${#cc} -ne 2 ] && { echo ""; return; }
+    local o1 o2
+    o1=$(printf '%d' "'${cc:0:1}")
+    o2=$(printf '%d' "'${cc:1:1}")
+    printf "\\U1F1$(printf '%X' $((o1-65+0xE6)))\\U1F1$(printf '%X' $((o2-65+0xE6)))"
+}
+extract_isp_from_org() {
+    local org="$1"
+    org="${org#AS[0-9]* }"
+    org=$(echo "$org" | sed -E 's/[, ]*(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|Hosting|Host).*$//i' | sed -E 's/ *$//')
+    echo "$org"
+}
+extract_asn_from_org() {
+    local org="$1"
+    local asn
+    asn=$(echo "$org" | grep -oE 'AS[0-9]+' | head -n1)
+    echo "$asn"
+}
+
 apply_base_name_from_ip() {
     local e c isp
-    # 优先 v4
     if [ -n "$EMOJI4" ] || [ -n "$COUNTRY4" ]; then
         e="$EMOJI4"; c="$COUNTRY4"; isp="$ISP_CLEAN4"
     elif [ -n "$EMOJI6" ] || [ -n "$COUNTRY6" ]; then
@@ -368,7 +407,6 @@ BASE_REGION_NAME=$(printf '%q' "$BASE_REGION_NAME")
 BASE_FULL_NAME=$(printf '%q' "$BASE_FULL_NAME")
 EOF
 }
-
 load_ip_cache() {
     [ -f "$ip_cache_file" ] || return 1
     # shellcheck disable=SC1090
@@ -382,7 +420,6 @@ load_ip_cache() {
     fi
     return 1
 }
-
 refresh_ip_cache_if_changed() {
     [ -f "$ip_cache_file" ] || return 1
     local mt
@@ -393,6 +430,17 @@ refresh_ip_cache_if_changed() {
     return 0
 }
 
+# IPinfo API 检测
+fetch_ipinfo_by_family() {
+    local family="$1" bind_arg="$2" out="$3"
+    local url="https://ipinfo.io/json"
+    if [ "$family" = "4" ]; then
+        wget $bind_arg -4 -qO- --no-check-certificate --tries=2 --timeout=4 "$url" > "$out" 2>/dev/null
+    else
+        wget $bind_arg -6 -qO- --no-check-certificate --tries=2 --timeout=4 "$url" > "$out" 2>/dev/null
+    fi
+}
+
 check_system_ip() {
     [ "$IP_CHECKED" = "1" ] && return
     local IF4 IF6 BA4="" BA6=""
@@ -401,8 +449,8 @@ check_system_ip() {
 
     if [ -n "${IF4}${IF6}" ]; then
         local L4 L6
-        L4=$(ip -4 addr show "$IF4" 2>/dev/null | sed -n 's#.*inet \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
-        L6=$(ip -6 addr show "$IF6" 2>/dev/null | sed -n 's#.*inet6 \([^/]\+\)/[0-9]\+.*global.*#\1#gp')
+        L4=$(ip -4 addr show "$IF4" 2>/dev/null | sed -n 's#.*inet \([^/]\+\)/[0-9]\+.*global.*#\1#gp' | head -n1)
+        L6=$(ip -6 addr show "$IF6" 2>/dev/null | sed -n 's#.*inet6 \([^/]\+\)/[0-9]\+.*global.*#\1#gp' | head -n1)
         [ -n "$L4" ] && BA4="--bind-address=$L4"
         [ -n "$L6" ] && BA6="--bind-address=$L6"
     fi
@@ -411,9 +459,9 @@ check_system_ip() {
     t4=$(mktemp)
     t6=$(mktemp)
 
-    wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t4" 2>/dev/null &
+    fetch_ipinfo_by_family 4 "$BA4" "$t4" &
     local p4=$!
-    wget $BA6 -6 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t6" 2>/dev/null &
+    fetch_ipinfo_by_family 6 "$BA6" "$t6" &
     local p6=$!
 
     wait "$p4" 2>/dev/null || true
@@ -424,32 +472,26 @@ check_system_ip() {
     J6=$(cat "$t6" 2>/dev/null)
     rm -f "$t4" "$t6"
 
-    if [ -n "$J4" ]; then
-        WAN4=$(awk -F '"' '/"ip"/{print $4}' <<< "$J4")
-        COUNTRY4=$(awk -F '"' '/"country"/{print $4}' <<< "$J4")
-        EMOJI4=$(awk -F '"' '/"emoji"/{print $4}' <<< "$J4")
-        local A4 I4
-        A4=$(awk -F '"' '/"asn"/{print $4}' <<< "$J4" | grep -oE '[0-9]+' | head -n1)
-        I4=$(awk -F '"' '/"isp"/{print $4}' <<< "$J4")
-        [ -n "$A4" ] && AS_NUM4="AS${A4}" || AS_NUM4=$(echo "$I4" | grep -oE 'AS[0-9]+' | head -n1)
-        ISP_CLEAN4=$(echo "$I4" \
-            | sed -E 's/AS[0-9]+[ -]*//g' \
-            | sed -E 's/[, ]*(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|Hosting|Host).*$//i' \
-            | sed -E 's/ *$//')
+    if [ -n "$J4" ] && echo "$J4" | jq -e '.ip' >/dev/null 2>&1; then
+        WAN4=$(echo "$J4" | jq -r '.ip // empty')
+        local CC4 ORG4
+        CC4=$(echo "$J4" | jq -r '.country // empty')
+        ORG4=$(echo "$J4" | jq -r '.org // empty')
+        COUNTRY4=$(country_code_to_zh "$CC4")
+        EMOJI4=$(country_code_to_flag "$CC4")
+        AS_NUM4=$(extract_asn_from_org "$ORG4")
+        ISP_CLEAN4=$(extract_isp_from_org "$ORG4")
     fi
 
-    if [ -n "$J6" ]; then
-        WAN6=$(awk -F '"' '/"ip"/{print $4}' <<< "$J6")
-        COUNTRY6=$(awk -F '"' '/"country"/{print $4}' <<< "$J6")
-        EMOJI6=$(awk -F '"' '/"emoji"/{print $4}' <<< "$J6")
-        local A6 I6
-        A6=$(awk -F '"' '/"asn"/{print $4}' <<< "$J6" | grep -oE '[0-9]+' | head -n1)
-        I6=$(awk -F '"' '/"isp"/{print $4}' <<< "$J6")
-        [ -n "$A6" ] && AS_NUM6="AS${A6}" || AS_NUM6=$(echo "$I6" | grep -oE 'AS[0-9]+' | head -n1)
-        ISP_CLEAN6=$(echo "$I6" \
-            | sed -E 's/AS[0-9]+[ -]*//g' \
-            | sed -E 's/[, ]*(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|SAS|GmbH|Hosting|Host).*$//i' \
-            | sed -E 's/ *$//')
+    if [ -n "$J6" ] && echo "$J6" | jq -e '.ip' >/dev/null 2>&1; then
+        WAN6=$(echo "$J6" | jq -r '.ip // empty')
+        local CC6 ORG6
+        CC6=$(echo "$J6" | jq -r '.country // empty')
+        ORG6=$(echo "$J6" | jq -r '.org // empty')
+        COUNTRY6=$(country_code_to_zh "$CC6")
+        EMOJI6=$(country_code_to_flag "$CC6")
+        AS_NUM6=$(extract_asn_from_org "$ORG6")
+        ISP_CLEAN6=$(extract_isp_from_org "$ORG6")
     fi
 
     apply_base_name_from_ip
@@ -529,102 +571,65 @@ build_v6_domain_array_json() {
     if [ -n "$V6_SITE_LIST" ]; then
         if [ -n "$domains" ]; then domains="${domains},${V6_SITE_LIST}"; else domains="${V6_SITE_LIST}"; fi
     fi
-    jq -nc --arg s "$domains" '
-      ($s|split(",")|map(gsub("^\\s+|\\s+$";""))|map(select(length>0))|unique)
-    '
+    jq -nc --arg s "$domains" '($s|split(",")|map(gsub("^\\s+|\\s+$";""))|map(select(length>0))|unique)'
 }
 
 apply_outbound_policy_xray() {
     [ -f "$xray_conf" ] || return 0
     ensure_dns_routing || return 1
-
     update_config '
       .outbounds |=
       (
         map(select(.tag!="direct" and .tag!="direct-v4" and .tag!="direct-v6"))
         + [{"protocol":"freedom","tag":"direct-v4","settings":{"domainStrategy":"UseIPv4"}}]
         + [{"protocol":"freedom","tag":"direct-v6","settings":{"domainStrategy":"UseIPv6"}}]
-      )
-    ' || return 1
-
+      )' || return 1
     update_config 'del(.routing.rules[]? | select(.tag=="v6-route-rule"))' || return 1
 
     local arr_json
     arr_json=$(build_v6_domain_array_json)
     if [ "$(echo "$arr_json" | jq 'length')" -gt 0 ]; then
-        update_config --argjson d "$arr_json" \
-          '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-route-rule"}]' || return 1
+        update_config --argjson d "$arr_json" '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-route-rule"}]' || return 1
     fi
-    return 0
 }
-
 apply_outbound_policy_singbox() {
     [ -f "$sb_conf" ] || return 0
-
     local arr_json
     arr_json=$(build_v6_domain_array_json)
 
-    if ! jq '.outbounds' "$sb_conf" >/dev/null 2>&1; then
-        red "Sbox配置异常，缺少outbounds"
-        return 1
-    fi
+    if ! jq '.outbounds' "$sb_conf" >/dev/null 2>&1; then red "Sbox配置异常"; return 1; fi
 
-    if ! jq '
+    jq '
       .outbounds |=
       (
         map(select(.tag!="direct_ipv4" and .tag!="direct_ipv6"))
-        + [{
-            "type":"direct",
-            "tag":"direct_ipv4",
-            "domain_resolver":{"server":"dns4","strategy":"ipv4_only"}
-          }]
-        + [{
-            "type":"direct",
-            "tag":"direct_ipv6",
-            "domain_resolver":{"server":"dns4","strategy":"ipv6_only"}
-          }]
-      )
-    ' "$sb_conf" > "${sb_conf}.tmp"; then
-        red "Sbox出站更新失败"
-        rm -f "${sb_conf}.tmp"
-        return 1
-    fi
+        + [{"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns4","strategy":"ipv4_only"}}]
+        + [{"type":"direct","tag":"direct_ipv6","domain_resolver":{"server":"dns4","strategy":"ipv6_only"}}]
+      )' "$sb_conf" > "${sb_conf}.tmp" || { rm -f "${sb_conf}.tmp"; return 1; }
     mv "${sb_conf}.tmp" "$sb_conf"
 
     if [ "$(echo "$arr_json" | jq 'length')" -gt 0 ]; then
-        if ! jq --argjson d "$arr_json" '
+        jq --argjson d "$arr_json" '
           .route = (.route // {})
           | .route.rules = ((.route.rules // []) | map(select(.tag!="v6-route-rule")))
           | .route.rules += [{"domain":$d,"outbound":"direct_ipv6","tag":"v6-route-rule"}]
           | .route.final = "direct_ipv4"
-        ' "$sb_conf" > "${sb_conf}.tmp"; then
-            red "Sbox路由规则写入失败"
-            rm -f "${sb_conf}.tmp"
-            return 1
-        fi
+        ' "$sb_conf" > "${sb_conf}.tmp" || { rm -f "${sb_conf}.tmp"; return 1; }
     else
-        if ! jq '
+        jq '
           .route = (.route // {})
           | .route.rules = ((.route.rules // []) | map(select(.tag!="v6-route-rule")))
           | .route.final = "direct_ipv4"
-        ' "$sb_conf" > "${sb_conf}.tmp"; then
-            red "Sbox路由规则清理失败"
-            rm -f "${sb_conf}.tmp"
-            return 1
-        fi
+        ' "$sb_conf" > "${sb_conf}.tmp" || { rm -f "${sb_conf}.tmp"; return 1; }
     fi
-
     mv "${sb_conf}.tmp" "$sb_conf"
-    return 0
 }
-
 apply_outbound_policy_all() {
     apply_outbound_policy_xray || return 1
     apply_outbound_policy_singbox || true
     service_exists xray && manage_service restart xray
     service_exists tuic-box && manage_service restart tuic-box
     green "出站策略已应用（Xray + Sbox）"
-    return 0
 }
 
 install_xray_core() {
@@ -683,7 +688,6 @@ get_current_uuid_xray_or_fallback() {
     fi
     echo "$UUID_FALLBACK"
 }
-
 set_xray_uuid_no_validate() {
     local u="$1"
     [ -f "$xray_conf" ] || { red "xray未安装"; return 1; }
@@ -693,8 +697,7 @@ set_xray_uuid_no_validate() {
 }
 
 load_freeflow_state() {
-    FREEFLOW_MODE="none"
-    FF_PATH="/"
+    FREEFLOW_MODE="none"; FF_PATH="/"
     if [ -f "$freeflow_conf" ]; then
         local a b
         { read -r a; read -r b; } < "$freeflow_conf"
@@ -707,9 +710,9 @@ ask_freeflow_mode() {
     echo ""
     green "请选择免流方式"
     echo "-----------------------------------------------"
-    echo -e "${c_install} 1.${c_reset} ${c_manage}安装${c_reset}${c_freeflow}免流${c_reset} + ${c_manage}WS${c_reset}"
-    echo -e "${c_install} 2.${c_reset} ${c_manage}安装${c_reset}${c_freeflow}免流${c_reset} + ${c_manage}HTTPUpgrade${c_reset}"
-    echo -e "${c_uninstalled} 3.${c_reset} ${c_uninstalled}卸载${c_reset}${c_freeflow}免流${c_reset}"
+    echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_FREEFLOW}免流${C_RST} + WS"
+    echo -e "${C_INSTALL} 2.${C_RST} ${C_INSTALL}安装${C_RST}${C_FREEFLOW}免流${C_RST} + HTTPUpgrade"
+    echo -e "${C_BAD} 3.${C_RST} ${C_BAD}卸载${C_RST}${C_FREEFLOW}免流${C_RST}"
     echo "-----------------------------------------------"
     prompt "请选择: " c
     case "$c" in
@@ -725,13 +728,11 @@ ask_freeflow_mode() {
     fi
     printf '%s\n%s\n' "$FREEFLOW_MODE" "$FF_PATH" > "$freeflow_conf"
 }
-
 apply_freeflow_config() {
     [ -f "$xray_conf" ] || { red "xray未安装"; return 1; }
     ensure_dns_routing || return 1
     local uuid
     uuid=$(get_current_uuid_xray_or_fallback)
-
     update_config 'del(.inbounds[]? | select(.tag=="ff-in"))' || return 1
     if [ "$FREEFLOW_MODE" != "none" ]; then
         local ff
@@ -739,28 +740,25 @@ apply_freeflow_config() {
         update_config --argjson ib "$ff" '.inbounds += [$ib]' || return 1
     fi
     manage_service restart xray
-    return 0
 }
 
 manage_freeflow() {
     [ -f "$xray_conf" ] || { red "请先安装xray"; pause; return; }
     load_freeflow_state
-
     while true; do
         cls
-        local s="${c_unconfigured}未配置${c_reset}"
+        local s="${C_BAD}未配置${C_RST}"
         if [ "$FREEFLOW_MODE" != "none" ]; then
-            local m="${FREEFLOW_MODE^^}"
-            [ "$m" = "HTTPUPGRADE" ] && m="HTTP+"
-            s="${c_freeflow}${m}${c_reset} path=${FF_PATH}"
+            local m="${FREEFLOW_MODE^^}"; [ "$m" = "HTTPUPGRADE" ] && m="HTTP+"
+            s="${C_FREEFLOW}${m}${C_RST} path=${FF_PATH}"
         fi
-        echo -e "${c_freeflow}=============== 免流管理 ===============${c_reset}"
+        echo -e "${C_FREEFLOW}=============== 免流管理 ===============${C_RST}"
         printf "当前: %b\n" "$s"
         echo "-----------------------------------------------"
-        echo -e "${c_install} 1.${c_reset} ${c_modify}修改${c_reset}${c_freeflow}免流方式${c_reset}"
-        echo -e "${c_install} 2.${c_reset} ${c_modify}修改${c_reset}${c_freeflow}免流路径${c_reset}"
-        echo -e "${c_uninstalled} 3.${c_reset} ${c_uninstalled}卸载${c_reset}${c_freeflow}免流${c_reset}"
-        echo -e "${c_back} 0.${c_reset} ${c_back}返回${c_reset}"
+        echo -e "${C_MODIFY} 1.${C_RST} ${C_MODIFY}修改${C_RST}${C_FREEFLOW}免流方式${C_RST}"
+        echo -e "${C_MODIFY} 2.${C_RST} ${C_MODIFY}修改${C_RST}${C_FREEFLOW}免流路径${C_RST}"
+        echo -e "${C_BAD} 3.${C_RST} ${C_BAD}卸载${C_RST}${C_FREEFLOW}免流${C_RST}"
+        echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
         echo "==============================================="
         prompt "请选择: " c
         case "$c" in
@@ -796,9 +794,9 @@ manage_socks5() {
         local list
         list=$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$xray_conf" 2>/dev/null)
 
-        echo -e "${c_socks5}=============== Socks5管理 ===============${c_reset}"
+        echo -e "${C_SOCKS5}=============== Socks5管理 ===============${C_RST}"
         if [ -z "$list" ]; then
-            echo -e "当前: ${c_unconfigured}未配置${c_reset}"
+            echo -e "当前: ${C_BAD}未配置${C_RST}"
         else
             echo "-----------------------------------------------"
             echo "  端口    | 用户名    | 密码"
@@ -813,10 +811,10 @@ manage_socks5() {
         fi
 
         echo "-----------------------------------------------"
-        echo -e "${c_install} 1.${c_reset} ${c_install}安装${c_reset}${c_socks5}Socks5${c_reset}"
-        echo -e "${c_modify} 2.${c_reset} ${c_modify}修改${c_reset}${c_socks5}Socks5${c_reset}"
-        echo -e "${c_uninstalled} 3.${c_reset} ${c_uninstalled}卸载${c_reset}${c_socks5}Socks5${c_reset}"
-        echo -e "${c_back} 0.${c_reset} ${c_back}返回${c_reset}"
+        echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_SOCKS5}Socks5${C_RST}"
+        echo -e "${C_MODIFY} 2.${C_RST} ${C_MODIFY}修改${C_RST}${C_SOCKS5}Socks5${C_RST}"
+        echo -e "${C_BAD} 3.${C_RST} ${C_BAD}卸载${C_RST}${C_SOCKS5}Socks5${C_RST}"
+        echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
         echo "==============================================="
         prompt "请选择: " c
 
@@ -883,17 +881,11 @@ ask_apply_youtube_v6_once() {
     local ans
     prompt "是否启用 YouTube 走IPv6? (y/N): " ans
     case "$ans" in
-        y|Y)
-            YOUTUBE_V6=1
-            save_outbound_policy
-            apply_outbound_policy_all || true
-            ;;
-        *)
-            YOUTUBE_V6=0
-            save_outbound_policy
-            apply_outbound_policy_all || true
-            ;;
+        y|Y) YOUTUBE_V6=1 ;;
+        *)   YOUTUBE_V6=0 ;;
     esac
+    save_outbound_policy
+    apply_outbound_policy_all || true
 }
 
 install_or_reinstall_argo() {
@@ -1016,17 +1008,17 @@ uninstall_argo_only() {
 }
 
 restart_argo_if_installed() {
-    if service_exists tunnel-argo; then manage_service restart tunnel-argo; green "Argo 已重启"; else yellow "Argo 未安装"; fi
+    if service_exists tunnel-argo; then manage_service restart tunnel-argo; green "Argo 已重启"; else red "Argo未安装"; fi
 }
 restart_xray_if_installed() {
-    if service_exists xray; then manage_service restart xray; green "Xray 已重启"; else yellow "Xray 未安装"; fi
+    if service_exists xray; then manage_service restart xray; green "Xray 已重启"; else red "Xray未安装"; fi
 }
 
 show_xray_nodes() {
     cls
     [ "$IP_CHECKED" = "1" ] || { load_ip_cache >/dev/null 2>&1 || true; }
     [ "$IP_CHECKED" = "1" ] || check_system_ip
-    [ -f "$xray_conf" ] || { yellow "xray未安装"; echo "==============================================="; return; }
+    [ -f "$xray_conf" ] || { red "xray未安装"; echo "==============================================="; return; }
 
     local ip=""
     [ -n "$WAN4" ] && ip="$WAN4" || [ -n "$WAN6" ] && ip="$WAN6"
@@ -1034,8 +1026,7 @@ show_xray_nodes() {
     uuid=$(get_current_uuid_xray_or_fallback)
 
     local base_full base_region
-    base_full="$BASE_FULL_NAME"
-    base_region="$BASE_REGION_NAME"
+    base_full="$BASE_FULL_NAME"; base_region="$BASE_REGION_NAME"
     [ -z "$base_full" ] && base_full="Node"
     [ -z "$base_region" ] && base_region="Node"
 
@@ -1046,7 +1037,6 @@ show_xray_nodes() {
         d=$(cat "$argo_domain_file")
         xextra=$(url_encode "$XHTTP_EXTRA_JSON")
 
-        # 命名逻辑：🇺🇸 [美国] Alice - Argo - Xhttp
         local name_xhttp="${base_full} - Argo - Xhttp"
         local name_ws="${base_full} - Argo - Ws"
         local name_ss="${base_full} - Argo - Ss"
@@ -1067,11 +1057,10 @@ show_xray_nodes() {
 
     load_freeflow_state
     if [ "$FREEFLOW_MODE" != "none" ] && [ -n "$ip" ]; then
-        local p m
+        local p m ff_name
         p=$(url_encode "$FF_PATH")
         m="${FREEFLOW_MODE^^}"; [ "$m" = "HTTPUPGRADE" ] && m="HTTP+"
-        # 非Argo
-        local ff_name="${base_full} - ${m}"
+        ff_name="${base_full} - ${m}"
         purple "vless://${uuid}@${ip}:80?encryption=none&security=none&type=${FREEFLOW_MODE}&host=${ip}&path=${p}#$(url_encode "$ff_name")"
         echo ""
         count=$((count+1))
@@ -1081,11 +1070,11 @@ show_xray_nodes() {
     sl=$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$xray_conf" 2>/dev/null)
     if [ -n "$sl" ] && [ -n "$ip" ]; then
         while read -r line; do
-            local p u pw
+            local p u pw sname
             p=$(echo "$line" | jq -r '.port')
             u=$(echo "$line" | jq -r '.settings.accounts[0].user')
             pw=$(echo "$line" | jq -r '.settings.accounts[0].pass')
-            local sname="${base_full} - Socks5-${p}"
+            sname="${base_full} - Socks5-${p}"
             purple "socks5://${u}:${pw}@${ip}:${p}#$(url_encode "$sname")"
             echo ""
             count=$((count+1))
@@ -1099,29 +1088,23 @@ show_xray_nodes() {
 show_tuic_node() {
     cls
     load_tuic_state
-    [ -f "$sb_state" ] || { yellow "Tuic未安装"; echo "=========================================="; return; }
+    [ -f "$sb_state" ] || { red "Tuic未安装"; echo "=========================================="; return; }
 
     local port cc domain uuid
     IFS='|' read -r port cc domain uuid < "$sb_state"
     [ -z "$port" ] || [ -z "$domain" ] || [ -z "$uuid" ] && { red "Tuic状态文件不完整"; return; }
 
-    local base_full base_region
-    base_full="$BASE_FULL_NAME"
-    base_region="$BASE_REGION_NAME"
+    local base_full base_region name link
+    base_full="$BASE_FULL_NAME"; base_region="$BASE_REGION_NAME"
     [ -z "$base_full" ] && base_full="Node"
     [ -z "$base_region" ] && base_region="Node"
 
-    # 逻辑：
-    # 有ISP -> 🇺🇸 [美国] Alice - Tuic
-    # 无ISP -> 🇺🇸 [美国] Tuic
-    local name
     if [[ "$base_full" == "$base_region" ]]; then
         name="${base_region} Tuic"
     else
         name="${base_full} - Tuic"
     fi
 
-    local link
     link="tuic://${uuid}:${uuid}@${domain}:${port}?congestion_control=${cc:-bbr}&alpn=h3&sni=${domain}&udp_relay_mode=quic&allow_insecure=0#$(url_encode "$name")"
 
     green "=============== Tuic 节点 ==============="
@@ -1160,7 +1143,6 @@ ensure_acme() {
         tail -n 60 /tmp/acme_force_install.log 2>/dev/null
         return 1
     }
-    return 0
 }
 
 issue_cert_cf_token() {
@@ -1168,35 +1150,22 @@ issue_cert_cf_token() {
     local crt="${tls_dir}/${domain}.crt" key="${tls_dir}/${domain}.key"
     mkdir -p "$tls_dir"
 
-    if [ -s "$crt" ] && [ -s "$key" ]; then
-        green "证书已存在: $domain"
-        return 0
-    fi
+    if [ -s "$crt" ] && [ -s "$key" ]; then green "证书已存在: $domain"; return 0; fi
 
     ensure_acme || return 1
     export CF_Token="$token"
 
     yellow "申请证书: $domain"
     "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-    "$HOME/.acme.sh/acme.sh" --issue -d "$domain" --dns dns_cf -k ec-256 >/tmp/acme_issue.log 2>&1
-    if [ $? -ne 0 ]; then
-        red "签发失败"
-        tail -n 80 /tmp/acme_issue.log
-        return 1
-    fi
+    "$HOME/.acme.sh/acme.sh" --issue -d "$domain" --dns dns_cf -k ec-256 >/tmp/acme_issue.log 2>&1 || {
+        red "签发失败"; tail -n 80 /tmp/acme_issue.log; return 1;
+    }
 
     "$HOME/.acme.sh/acme.sh" --installcert -d "$domain" \
-      --fullchainpath "$crt" \
-      --keypath "$key" \
-      --ecc >/tmp/acme_installcert.log 2>&1
+      --fullchainpath "$crt" --keypath "$key" --ecc >/tmp/acme_installcert.log 2>&1
 
-    if [ ! -s "$crt" ] || [ ! -s "$key" ]; then
-        red "安装证书失败"
-        tail -n 80 /tmp/acme_installcert.log
-        return 1
-    fi
+    [ -s "$crt" ] && [ -s "$key" ] || { red "安装证书失败"; tail -n 80 /tmp/acme_installcert.log; return 1; }
     green "证书安装成功"
-    return 0
 }
 
 ensure_port_open() {
@@ -1215,10 +1184,10 @@ install_singbox_core_only() {
     if [ ! -x "$sb_bin" ]; then
         local suffix ver url tgz
         suffix=$(detect_singbox_suffix)
-        [ -z "$suffix" ] && { red "当前架构不支持 sing-box"; return 1; }
+        [ -z "$suffix" ] && { red "当前架构不支持sing-box"; return 1; }
 
         ver=$(wget -qO- "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name // empty')
-        [ -z "$ver" ] && { red "无法获取 sing-box 版本"; return 1; }
+        [ -z "$ver" ] && { red "无法获取sing-box版本"; return 1; }
 
         tgz="${SB_BASE}/sing-box.tar.gz"
         url="https://github.com/SagerNet/sing-box/releases/download/${ver}/sing-box-${ver#v}${suffix}.tar.gz"
@@ -1237,59 +1206,21 @@ write_tuic_config() {
     mkdir -p "$SB_BASE"
     cat > "$sb_conf" <<EOF
 {
-  "log": {
-    "disabled": false,
-    "level": "info",
-    "timestamp": true
-  },
-  "dns": {
-    "servers": [
-      {
-        "type": "udp",
-        "tag": "dns4",
-        "server": "1.1.1.1"
-      }
-    ]
-  },
+  "log": {"disabled": false, "level": "info", "timestamp": true},
+  "dns": {"servers": [{"type": "udp","tag": "dns4","server": "1.1.1.1"}]},
   "inbounds": [
     {
-      "type": "tuic",
-      "listen": "::",
-      "tag": "tuic-in",
-      "listen_port": ${port},
-      "users": [
-        {
-          "uuid": "${uuid}",
-          "password": "${uuid}"
-        }
-      ],
+      "type": "tuic","listen": "::","tag": "tuic-in","listen_port": ${port},
+      "users": [{"uuid": "${uuid}","password": "${uuid}"}],
       "congestion_control": "${cc}",
-      "tls": {
-        "enabled": true,
-        "server_name": "${domain}",
-        "alpn": ["h3"],
-        "certificate_path": "${crt}",
-        "key_path": "${key}"
-      }
+      "tls": {"enabled": true,"server_name": "${domain}","alpn": ["h3"],"certificate_path": "${crt}","key_path": "${key}"}
     }
   ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct_ipv4",
-      "domain_resolver": {
-        "server": "dns4",
-        "strategy": "ipv4_only"
-      }
-    }
-  ],
-  "route": {
-    "final": "direct_ipv4"
-  }
+  "outbounds": [{"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns4","strategy":"ipv4_only"}}],
+  "route": {"final":"direct_ipv4"}
 }
 EOF
 }
-
 install_singbox_service_if_missing() {
     if service_exists tuic-box; then return; fi
     if [ -f /etc/alpine-release ]; then
@@ -1318,7 +1249,6 @@ EOF
     fi
     manage_service enable tuic-box
 }
-
 start_singbox_and_check() {
     manage_service restart tuic-box
     sleep 1
@@ -1331,25 +1261,17 @@ start_singbox_and_check() {
     fi
     return 1
 }
-
 load_tuic_state() {
     TUIC_PORT=""; TUIC_CC=""; TUIC_DOMAIN=""; TUIC_UUID=""
     [ -f "$sb_state" ] || return
     IFS='|' read -r TUIC_PORT TUIC_CC TUIC_DOMAIN TUIC_UUID < "$sb_state"
 }
-
 install_tuic_flow() {
     install_singbox_core_only || return 1
-
     local domain token port cc uuid default_uuid
-    prompt "Tuic域名: " domain
-    [ -z "$domain" ] && { red "域名不能为空"; return 1; }
-
-    prompt "Cloudflare API Token: " token
-    [ -z "$token" ] && { red "Token不能为空"; return 1; }
-
-    prompt "Tuic端口(默认18443): " port
-    [ -z "$port" ] && port=18443
+    prompt "Tuic域名: " domain; [ -z "$domain" ] && { red "域名不能为空"; return 1; }
+    prompt "Cloudflare API Token: " token; [ -z "$token" ] && { red "Token不能为空"; return 1; }
+    prompt "Tuic端口(默认18443): " port; [ -z "$port" ] && port=18443
     [[ "$port" =~ ^[0-9]+$ ]] || { red "端口无效"; return 1; }
 
     echo "拥塞算法: 1.bbr 2.cubic 3.new_reno"
@@ -1366,7 +1288,6 @@ install_tuic_flow() {
 
     issue_cert_cf_token "$domain" "$token" || return 1
     ensure_port_open "$port" udp
-
     write_tuic_config "$domain" "$port" "$cc" "$uuid"
     install_singbox_service_if_missing
 
@@ -1374,18 +1295,15 @@ install_tuic_flow() {
     apply_outbound_policy_singbox || true
 
     start_singbox_and_check || return 1
-
     printf '%s|%s|%s|%s\n' "$port" "$cc" "$domain" "$uuid" > "$sb_state"
     green "Tuic 安装成功"
     show_tuic_node
-    return 0
 }
 
 restart_singbox_menu() {
-    if ! service_exists tuic-box; then yellow "Tuic未安装"; return; fi
+    if ! service_exists tuic-box; then red "Tuic未安装"; return; fi
     start_singbox_and_check && green "Tuic已重启"
 }
-
 uninstall_singbox_menu() {
     manage_service stop tuic-box 2>/dev/null
     manage_service disable tuic-box 2>/dev/null
@@ -1404,17 +1322,11 @@ load_restart_hours() {
 setup_cron_env_if_missing() {
     if command -v crontab >/dev/null 2>&1; then return; fi
     if command -v apt-get >/dev/null 2>&1; then
-        manage_packages cron
-        manage_service enable cron 2>/dev/null || true
-        manage_service start cron 2>/dev/null || true
+        manage_packages cron; manage_service enable cron 2>/dev/null || true; manage_service start cron 2>/dev/null || true
     elif command -v apk >/dev/null 2>&1; then
-        manage_packages dcron
-        rc-service dcron start 2>/dev/null || true
-        rc-update add dcron default >/dev/null 2>&1 || true
+        manage_packages dcron; rc-service dcron start 2>/dev/null || true; rc-update add dcron default >/dev/null 2>&1 || true
     else
-        manage_packages cronie
-        manage_service enable crond 2>/dev/null || true
-        manage_service start crond 2>/dev/null || true
+        manage_packages cronie; manage_service enable crond 2>/dev/null || true; manage_service start crond 2>/dev/null || true
     fi
 }
 manage_restart_hours() {
@@ -1476,7 +1388,6 @@ create_zram_swap() {
     echo "$((mb * 1024 * 1024))" > "/sys/block/${zname}/disksize" 2>/dev/null || return 1
     mkswap "$zdev" >/dev/null 2>&1 || return 1
     swapon "$zdev" >/dev/null 2>&1 || return 1
-    return 0
 }
 create_swapfile_dd() {
     local mb="$1"
@@ -1485,7 +1396,6 @@ create_swapfile_dd() {
     mkswap /swapfile >/dev/null 2>&1 || return 1
     swapon /swapfile >/dev/null 2>&1 || return 1
     grep -q "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null || echo "/swapfile none swap sw 0 0" >> /etc/fstab
-    return 0
 }
 create_swapfile_fallocate() {
     local mb="$1"
@@ -1495,7 +1405,6 @@ create_swapfile_fallocate() {
     mkswap -f /swapfile >/dev/null 2>&1 || return 1
     swapon /swapfile >/dev/null 2>&1 || return 1
     grep -q "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null || echo "/swapfile none swap sw 0 0" >> /etc/fstab
-    return 0
 }
 create_swap_best_effort() {
     local mb="${1:-256}"
@@ -1513,12 +1422,12 @@ manage_swap() {
         local ram sw
         ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null); [ -z "$ram" ] && ram=0
         sw=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null); [ -z "$sw" ] && sw=0
-        echo -e "${c_swap}=============== SWAP管理 ===============${c_reset}"
+        echo -e "${C_SWAP}=============== SWAP管理 ===============${C_RST}"
         echo "RAM: ${ram}MB  SWAP: ${sw}MB"
         echo "-----------------------------------------------"
-        echo -e "${c_install} 1.${c_reset} ${c_install}安装${c_reset}/${c_modify}修改${c_reset}${c_swap}SWAP${c_reset}"
-        echo -e "${c_uninstalled} 2.${c_reset} ${c_uninstalled}卸载${c_reset}${c_swap}SWAP${c_reset}"
-        echo -e "${c_back} 0.${c_reset} ${c_back}返回${c_reset}"
+        echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}/${C_MODIFY}修改${C_RST}${C_SWAP}SWAP${C_RST}"
+        echo -e "${C_BAD} 2.${C_RST} ${C_BAD}卸载${C_RST}${C_SWAP}SWAP${C_RST}"
+        echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
         echo "==============================================="
         prompt "请选择: " c
         case "$c" in
@@ -1536,45 +1445,31 @@ manage_outbound_policy_menu() {
         cls
         local ystat
         [ "$YOUTUBE_V6" = "1" ] && ystat="\033[1;32m已开启\033[0m" || ystat="\033[1;91m未开启\033[0m"
-        echo -e "${c_outbound}========== 出站管理（Xray + Sbox）==========${c_reset}"
+        echo -e "${C_OUTBOUND}========== 出站管理（Xray + Sbox）==========${C_RST}"
         echo -e "默认出站: \033[1;36mIPv4\033[0m"
         echo -e "YouTube IPv6: ${ystat}"
         echo -e "IPv6规则: \033[1;36m${V6_SITE_LIST:-（空）}\033[0m"
         echo "-----------------------------------------------"
-        echo -e "${c_install} 1.${c_reset} ${c_outbound}开启YouTube IPv6出站${c_reset}"
-        echo -e "${c_install} 2.${c_reset} ${c_outbound}添加IPv6出站规则${c_reset}"
-        echo -e "${c_uninstalled} 3.${c_reset} ${c_outbound}删除IPv6出站规则${c_reset}"
-        echo -e "${c_restart} 4.${c_reset} ${c_restart}重启服务规则生效${c_reset}"
-        echo -e "${c_back} 0.${c_reset} ${c_back}返回${c_reset}"
+        echo -e "\033[1;32m 1.\033[0m \033[1;32m开启\033[0m${C_OUTBOUND}YouTube IPv6出站${C_RST}"
+        echo -e "\033[1;36m 2.\033[0m \033[1;36m添加\033[0m${C_OUTBOUND}IPv6出站规则${C_RST}"
+        echo -e "\033[1;91m 3.\033[0m \033[1;91m删除\033[0m${C_OUTBOUND}IPv6出站规则${C_RST}"
+        echo -e "\033[1;33m 4.\033[0m \033[1;33m重启\033[0m服务应用规则"
+        echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
         echo "==============================================="
         prompt "请选择: " c
         case "$c" in
-            1)
-                YOUTUBE_V6=1
-                save_outbound_policy
-                green "已开启YouTube IPv6出站"
-                pause
-                ;;
+            1) YOUTUBE_V6=1; save_outbound_policy; green "已开启YouTube IPv6出站"; pause ;;
             2)
-                prompt "输入域名(逗号分隔，如 netflix.com,openai.com): " s
+                prompt "输入域名(逗号分隔): " s
                 [ -z "$s" ] && { red "不能为空"; pause; continue; }
-                if [ -z "$V6_SITE_LIST" ]; then
-                    V6_SITE_LIST="$s"
-                else
-                    V6_SITE_LIST="${V6_SITE_LIST},${s}"
-                fi
+                [ -z "$V6_SITE_LIST" ] && V6_SITE_LIST="$s" || V6_SITE_LIST="${V6_SITE_LIST},${s}"
                 V6_SITE_LIST=$(echo "$V6_SITE_LIST" | sed 's/,,*/,/g; s/^,//; s/,$//')
                 save_outbound_policy
                 green "已添加规则"
                 pause
                 ;;
             3)
-                if [ -z "$V6_SITE_LIST" ]; then
-                    red "规则为空"
-                    pause
-                    continue
-                fi
-
+                if [ -z "$V6_SITE_LIST" ]; then red "规则为空"; pause; continue; fi
                 local arr i=1
                 IFS=',' read -r -a arr <<< "$V6_SITE_LIST"
                 echo "当前规则："
@@ -1587,7 +1482,6 @@ manage_outbound_policy_menu() {
                 echo "  a. 全部删除"
                 echo "  0. 取消"
                 prompt "请输入序号或a: " idx
-
                 if [ "$idx" = "a" ] || [ "$idx" = "A" ]; then
                     V6_SITE_LIST=""
                     save_outbound_policy
@@ -1595,21 +1489,15 @@ manage_outbound_policy_menu() {
                     pause
                     continue
                 fi
-
                 if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -le 0 ] || [ "$idx" -ge "$i" ]; then
                     [ "$idx" = "0" ] && continue
-                    red "序号无效"
-                    pause
-                    continue
+                    red "序号无效"; pause; continue
                 fi
-
                 local new="" j=1
                 for d in "${arr[@]}"; do
                     d=$(echo "$d" | sed 's/^ *//; s/ *$//')
                     [ -z "$d" ] && continue
-                    if [ "$j" -ne "$idx" ]; then
-                        [ -z "$new" ] && new="$d" || new="${new},${d}"
-                    fi
+                    [ "$j" -ne "$idx" ] && { [ -z "$new" ] && new="$d" || new="${new},${d}"; }
                     j=$((j+1))
                 done
                 V6_SITE_LIST="$new"
@@ -1617,10 +1505,7 @@ manage_outbound_policy_menu() {
                 green "已删除"
                 pause
                 ;;
-            4)
-                apply_outbound_policy_all
-                pause
-                ;;
+            4) apply_outbound_policy_all; pause ;;
             0) return ;;
             *) red "无效"; pause ;;
         esac
@@ -1632,26 +1517,25 @@ xray_menu() {
         cls
         local x_stat a_stat
         if [ -x "$xray_bin" ]; then
-            x_stat=$(is_service_running xray && echo "\033[1;36m运行中\033[0m" || echo "\033[1;91m未启动\033[0m")
+            x_stat=$(is_service_running xray && echo "\033[1;36m运行中\033[0m" || echo "${C_BAD}未启动${C_RST}")
         else
-            x_stat="${c_uninstalled}未安装${c_reset}"
+            x_stat="${C_BAD}未安装${C_RST}"
         fi
         if service_exists tunnel-argo; then
-            a_stat=$(is_service_running tunnel-argo && echo "\033[1;36m运行中\033[0m" || echo "\033[1;91m未启动\033[0m")
+            a_stat=$(is_service_running tunnel-argo && echo "\033[1;36m运行中\033[0m" || echo "${C_BAD}未启动${C_RST}")
         else
-            a_stat="${c_unconfigured}未配置${c_reset}"
+            a_stat="${C_BAD}未配置${C_RST}"
         fi
 
-        echo -e "${c_xray}=============== Xray管理 ===============${c_reset}"
-        echo -e "Xray: ${x_stat}    Argo: ${a_stat}"
+        echo -e "${C_XRAY}=============== Xray管理 ===============${C_RST}"
+        echo -e "${C_XRAY}Xray${C_RST}: ${x_stat}     ${C_ARGO}Argo${C_RST}: ${a_stat}"
         echo "-----------------------------------------------"
-        echo -e "${c_install} 1.${c_reset} ${c_install}安装${c_reset} ${c_argo}Argo${c_reset}                         ${c_view} 6.${c_reset} ${c_view}查看${c_reset}${c_node}节点${c_reset}"
-        echo -e "${c_restart} 8.${c_reset} ${c_restart}重启${c_reset} ${c_xray}Xray${c_reset}                         ${c_modify} 5.${c_reset} ${c_modify}修改${c_reset}${c_uuid}UUID${c_reset}"
-        echo -e "${c_restart} 7.${c_reset} ${c_restart}重启${c_reset} ${c_argo}Argo${c_reset}                         ${c_manage} 3.${c_reset} ${c_manage}管理${c_reset}${c_socks5}Socks5${c_reset}"
-        echo -e "${c_uninstalled} 9.${c_reset} ${c_uninstalled}卸载${c_reset} ${c_xray}Xray${c_reset}                         ${c_manage} 4.${c_reset} ${c_manage}管理${c_reset}${c_freeflow}免流${c_reset}"
-        echo -e "${c_uninstalled} 2.${c_reset} ${c_uninstalled}卸载${c_reset} ${c_argo}Argo${c_reset}                         ${c_back} 0.${c_reset} ${c_back}返回${c_reset}"
+        echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_ARGO}Argo${C_RST}              ${C_VIEW} 6.${C_RST} ${C_VIEW}查看${C_RST}${C_NODE}节点${C_RST}"
+        echo -e "${C_RESTART} 8.${C_RST} ${C_RESTART}重启${C_RST}${C_XRAY}Xray${C_RST}              ${C_MODIFY} 5.${C_RST} ${C_MODIFY}修改${C_RST}${C_UUID}UUID${C_RST}"
+        echo -e "${C_RESTART} 7.${C_RST} ${C_RESTART}重启${C_RST}${C_ARGO}Argo${C_RST}              ${C_MANAGE} 3.${C_RST} ${C_MANAGE}管理${C_RST}${C_SOCKS5}Socks5${C_RST}"
+        echo -e "${C_BAD} 9.${C_RST} ${C_BAD}卸载${C_RST}${C_XRAY}Xray${C_RST}              ${C_MANAGE} 4.${C_RST} ${C_MANAGE}管理${C_RST}${C_FREEFLOW}免流${C_RST}"
+        echo -e "${C_BAD} 2.${C_RST} ${C_BAD}卸载${C_RST}${C_ARGO}Argo${C_RST}              ${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
         echo "==============================================="
-
         prompt "请选择: " c
         case "$c" in
             1) install_or_reinstall_argo; pause ;;
@@ -1672,11 +1556,9 @@ xray_menu() {
                 manage_service stop tunnel-argo 2>/dev/null
                 manage_service disable tunnel-argo 2>/dev/null
                 rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
-
                 manage_service stop xray 2>/dev/null
                 manage_service disable xray 2>/dev/null
                 rm -f /etc/init.d/xray /etc/systemd/system/xray.service
-
                 rm -f "$xray_bin" "$xray_conf" "${work_dir}/argo" "$argo_domain_file" "$argo_yml" "$argo_json" "${work_dir}/argo_start.sh" "$freeflow_conf"
                 green "Xray已卸载"
                 pause
@@ -1692,19 +1574,19 @@ singbox_menu() {
         cls
         local st
         if [ -x "$sb_bin" ]; then
-            st=$(is_service_running tuic-box && echo "\033[1;36m运行中\033[0m" || echo "\033[1;91m未启动\033[0m")
+            st=$(is_service_running tuic-box && echo "\033[1;36m运行中\033[0m" || echo "${C_BAD}未启动${C_RST}")
         else
-            st="${c_uninstalled}未安装${c_reset}"
+            st="${C_BAD}未安装${C_RST}"
         fi
 
-        echo -e "${c_manage}=============== Sbox管理 ===============${c_reset}"
+        echo -e "${C_SBOX}=============== Sbox管理 ===============${C_RST}"
         echo -e "Sbox: ${st}"
         echo "-----------------------------------------------"
-        echo -e "${c_install} 1.${c_reset} ${c_install}安装${c_reset}${c_tuic}Tuic${c_reset}"
-        echo -e "${c_view} 2.${c_reset} ${c_view}查看${c_reset}${c_tuic}Tuic${c_reset}${c_node}节点${c_reset}"
-        echo -e "${c_restart} 3.${c_reset} ${c_restart}重启${c_reset}${c_tuic}Tuic${c_reset}"
-        echo -e "${c_uninstalled} 4.${c_reset} ${c_uninstalled}卸载${c_reset}${c_tuic}Tuic${c_reset}"
-        echo -e "${c_back} 0.${c_reset} ${c_back}返回${c_reset}"
+        echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_TUIC}Tuic${C_RST}"
+        echo -e "${C_VIEW} 2.${C_RST} ${C_VIEW}查看${C_RST}${C_NODE}节点${C_RST}"
+        echo -e "${C_RESTART} 3.${C_RST} ${C_RESTART}重启${C_RST}${C_TUIC}Tuic${C_RST}"
+        echo -e "${C_BAD} 4.${C_RST} ${C_BAD}卸载${C_RST}${C_TUIC}Tuic${C_RST}"
+        echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
         echo "==============================================="
         prompt "请选择: " c
         case "$c" in
@@ -1764,24 +1646,29 @@ EOF
     fi
 }
 
+wait_ip_first_time() {
+    if [ -f "$ip_cache_file" ] && load_ip_cache; then
+        IP_CACHE_MTIME=$(stat -c %Y "$ip_cache_file" 2>/dev/null || echo 0)
+        return 0
+    fi
+
+    cls
+    echo -e "\033[1;33mIP信息加载中，请稍候...\033[0m"
+    check_system_ip
+    IP_CACHE_MTIME=$(stat -c %Y "$ip_cache_file" 2>/dev/null || echo 0)
+}
+
 bootstrap_fast() {
     manage_packages jq wget curl iproute2 coreutils tar unzip openssl >/dev/null 2>&1
     install_shortcut_once
     get_sys_info
     load_restart_hours
     load_outbound_policy
-
-    if load_ip_cache; then
-        IP_CACHE_MTIME=$(stat -c %Y "$ip_cache_file" 2>/dev/null || echo 0)
-    else
-        IP_CHECKED=0
-        start_ip_check_bg
-    fi
+    wait_ip_first_time
 }
 
 main_menu() {
     bootstrap_fast
-
     while true; do
         cls
         refresh_ip_cache_if_changed || true
@@ -1794,18 +1681,18 @@ main_menu() {
             p4=$(printf "%-${pad}s" "$WAN4")
             ip4_disp="\033[1;36m${p4}  (${COUNTRY4} ${AS_NUM4} ${ISP_CLEAN4})\033[0m"
         elif [ "$IP_CHECKED" = "1" ]; then
-            ip4_disp="${c_unconfigured}未配置${c_reset}"
+            ip4_disp="${C_BAD}未配置${C_RST}"
         else
-            ip4_disp="\033[1;33m检测中...\033[0m"
+            ip4_disp="${C_BAD}未启动${C_RST}"
         fi
 
         if [ "$IP_CHECKED" = "1" ] && [ -n "$WAN6" ]; then
             p6=$(printf "%-${pad}s" "$WAN6")
             ip6_disp="\033[1;36m${p6}  (${COUNTRY6} ${AS_NUM6} ${ISP_CLEAN6})\033[0m"
         elif [ "$IP_CHECKED" = "1" ]; then
-            ip6_disp="${c_unconfigured}未配置${c_reset}"
+            ip6_disp="${C_BAD}未配置${C_RST}"
         else
-            ip6_disp="\033[1;33m检测中...\033[0m"
+            ip6_disp="${C_BAD}未启动${C_RST}"
         fi
 
         mem_used=$(get_used_mem_display)
@@ -1815,14 +1702,10 @@ main_menu() {
         echo -e "v6 : ${ip6_disp}"
         echo -e "Mem: \033[1;36m${mem_used}\033[0m"
         echo "-----------------------------------------------"
-        echo -e "${c_manage} 1.${c_reset} ${c_manage}管理${c_reset} ${c_xray}Xray${c_reset}"
-        echo -e "${c_manage} 2.${c_reset} ${c_manage}管理${c_reset} Sbox"
-        echo -e "${c_manage} 3.${c_reset} ${c_manage}管理${c_reset}${c_outbound}出站${c_reset}"
-        echo -e "${c_restart} 4.${c_reset} ${c_restart}重启${c_reset}策略"
-        echo -e "${c_manage} 5.${c_reset} ${c_manage}管理${c_reset}${c_swap}SWAP${c_reset}"
-        echo -e "${c_install} 6.${c_reset} ${c_install}创建${c_reset}快捷"
-        echo -e "${c_uninstalled} 9.${c_reset} ${c_uninstalled}彻底卸载${c_reset}"
-        echo -e "${c_back} 0.${c_reset} ${c_back}返回${c_reset}/退出"
+        echo -e "${C_MANAGE} 1.${C_RST} ${C_MANAGE}管理 Xray${C_RST}           ${C_MANAGE} 5.${C_RST} ${C_MANAGE}管理${C_RST}${C_SWAP} SWAP${C_RST}"
+        echo -e "${C_MANAGE} 2.${C_RST} ${C_MANAGE}管理${C_RST}${C_SBOX} Sbox${C_RST}           ${C_INSTALL} 6.${C_RST} ${C_INSTALL}创建${C_RST}${C_SHORTCUT} 快捷${C_RST}"
+        echo -e "${C_MANAGE} 3.${C_RST} ${C_MANAGE}管理${C_RST}${C_OUTBOUND} 出站${C_RST}${C_POLICY} 策略${C_RST}     ${C_BAD} 9.${C_RST} ${C_BAD}彻底 卸载${C_RST}"
+        echo -e "${C_RESTART} 4.${C_RST} ${C_RESTART}定时 重启${C_RST}           ${C_BAD} 0.${C_RST} ${C_BAD}退出${C_RST}"
         echo "==============================================="
 
         prompt "请选择: " c
