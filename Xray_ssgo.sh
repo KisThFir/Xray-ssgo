@@ -188,12 +188,28 @@ smart_download(){
   local t=0
   while [ "$t" -lt 3 ]; do
     rm -f "$out"
-    wget -q --show-progress --timeout=30 --tries=1 -O "$out" "$url" || true
+
+    # 先用 curl（最稳）
+    if command -v curl >/dev/null 2>&1; then
+      curl -L --connect-timeout 10 --max-time 60 -o "$out" "$url" >/dev/null 2>&1 || true
+    fi
+
+    # curl 失败再用 wget（兼容 BusyBox）
+    if [ ! -s "$out" ] && command -v wget >/dev/null 2>&1; then
+      if wget --help 2>&1 | grep -q -- '--show-progress'; then
+        wget -q --show-progress --timeout=30 --tries=1 -O "$out" "$url" || true
+      else
+        # BusyBox wget
+        wget -q -T 30 -O "$out" "$url" || true
+      fi
+    fi
+
     if [ -f "$out" ]; then
       local sz
       sz=$(wc -c < "$out" 2>/dev/null || echo 0)
       [ "${sz:-0}" -ge "$min" ] && return 0
     fi
+
     t=$((t+1))
     sleep 2
   done
@@ -422,12 +438,13 @@ check_ip(){
   fi
 
   # ========== 仅 IPv4 用 cloudflare.now.cc ==========
-  local t4 j4=""
-  t4="$(mktemp 2>/dev/null || echo /tmp/ip4.$$)"
-  wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t4" 2>/dev/null || true
-  j4="$(cat "$t4" 2>/dev/null || true)"
-  rm -f "$t4" >/dev/null 2>&1 || true
-  parse_cf_json 4 "$j4" || true
+  local j4=""
+if [ -n "${L4:-}" ]; then
+  j4="$(curl -4 -sk --interface "$L4" --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
+else
+  j4="$(curl -4 -sk --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
+fi
+parse_cf_json 4 "$j4" || true
 
   # IPv4 回退：ipify + ipinfo
   if [ -z "${WAN4:-}" ]; then
@@ -1547,12 +1564,30 @@ sys_info(){
   else
     osv="Linux"
   fi
+
   ker="$(cut -d- -f1 < /proc/sys/kernel/osrelease 2>/dev/null || uname -r)"
-  if command -v systemd-detect-virt >/dev/null 2>&1; then virt="$(systemd-detect-virt 2>/dev/null || echo unknown)"; else virt="unknown"; fi
+
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    virt="$(systemd-detect-virt 2>/dev/null || echo unknown)"
+  else
+    if grep -qaE 'docker|containerd|kubepods' /proc/1/cgroup 2>/dev/null; then
+      virt="docker"
+    elif grep -qa 'lxc' /proc/1/cgroup 2>/dev/null || grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+      virt="lxc"
+    elif [ -f /proc/vz/version ]; then
+      virt="openvz"
+    elif grep -qi 'kvm' /proc/cpuinfo 2>/dev/null; then
+      virt="kvm"
+    else
+      virt="unknown"
+    fi
+  fi
+
   mem="$(awk '/MemTotal/{m=$2/1024; if(m>1024) printf"%.1fG",m/1024; else printf"%.0fM",m}' /proc/meminfo 2>/dev/null)"
   disk="$(df -h / 2>/dev/null | awk 'NR==2{print $2}')"
   echo "${osv} | ${ker} | ${virt^^} | ${mem} | ${disk}"
 }
+
 mem_used_disp(){
   awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{u=t-a; if(t>1024*1024) printf "%.1fG/%.1fG",u/1024/1024,t/1024/1024; else printf "%.0fM/%.0fM",u/1024,t/1024}' /proc/meminfo 2>/dev/null
 }
