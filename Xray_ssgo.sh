@@ -395,6 +395,15 @@ get_local_ipv6_fallback(){
     | head -n1
 }
 
+get_local_ipv6_fallback(){
+  local ip6=""
+  # 优先取路由实际源地址
+  ip6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+  # 再回退全局地址
+  [ -z "$ip6" ] && ip6="$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | grep -v '^fe80:' | head -n1)"
+  echo "$ip6"
+}
+
 check_ip(){
   [ "${IP_CHECKED:-0}" = "1" ] && return 0
 
@@ -403,70 +412,54 @@ check_ip(){
   ISP4=""; ISP6=""
   EMOJI4=""; EMOJI6=""
 
-  local IF4="" IF6="" L4="" BA4=""
+  local IF4="" L4="" BA4=""
   IF4="$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
-  IF6="$(ip -6 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
 
   if [ -n "$IF4" ]; then
-    L4=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
-    [ -z "$L4" ] && L4=$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1)
+    L4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+    [ -z "$L4" ] && L4="$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1)"
     [ -n "$L4" ] && BA4="--bind-address=$L4"
   fi
 
-  local t4 t6 j4="" j6=""
+  # ========== 仅 IPv4 用 cloudflare.now.cc ==========
+  local t4 j4=""
   t4="$(mktemp 2>/dev/null || echo /tmp/ip4.$$)"
-  t6="$(mktemp 2>/dev/null || echo /tmp/ip6.$$)"
-
-  # 主探测：cloudflare.now.cc（IPv4绑定，IPv6不绑定避免源地址被固定错）
-  (wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t4" 2>/dev/null || true) &
-  local pid4=$!
-  (wget -6 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t6" 2>/dev/null || true) &
-  local pid6=$!
-
-  wait "$pid4" 2>/dev/null || true
-  wait "$pid6" 2>/dev/null || true
-
+  wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t4" 2>/dev/null || true
   j4="$(cat "$t4" 2>/dev/null || true)"
-  j6="$(cat "$t6" 2>/dev/null || true)"
-  rm -f "$t4" "$t6" >/dev/null 2>&1 || true
-
+  rm -f "$t4" >/dev/null 2>&1 || true
   parse_cf_json 4 "$j4" || true
-  parse_cf_json 6 "$j6" || true
 
-  # 回退1：IPv4
+  # IPv4 回退：ipify + ipinfo
   if [ -z "${WAN4:-}" ]; then
     local ip4=""
     ip4="$(curl -4 -sf --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     [ -n "$ip4" ] && fill_by_ipinfo_ip 4 "$ip4" || true
   fi
 
-  # 回退2：IPv6 优先 api64.ipify.org，失败本地 ip -6 addr
-  if [ -z "${WAN6:-}" ]; then
-    local ip6=""
-    ip6="$(curl -6 -sf --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
+  # ========== IPv6 独立：优先 api64.ipify.org ==========
+  local ip6=""
+  ip6="$(curl -6 -sf --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
+  if [ -n "$ip6" ]; then
+    WAN6="$ip6"
+    fill_by_ipinfo_ip 6 "$WAN6" || true
+  else
+    # 失败才本地兜底
+    ip6="$(get_local_ipv6_fallback || true)"
     if [ -n "$ip6" ]; then
-      fill_by_ipinfo_ip 6 "$ip6" || true
-    else
-      ip6="$(get_local_ipv6_fallback || true)"
-      if [ -n "$ip6" ]; then
-        WAN6="$ip6"
-        # 本地兜底也尽量补国家/运营商
-        fill_by_ipinfo_ip 6 "$WAN6" || true
-      fi
+      WAN6="$ip6"
+      fill_by_ipinfo_ip 6 "$WAN6" || true
     fi
   fi
 
-  # 回退3：双栈都空，走realip兜底
+  # 双栈都失败，最后兜底
   if [ -z "${WAN4:-}" ] && [ -z "${WAN6:-}" ]; then
     local rip=""
     rip="$(platform_get_realip 2>/dev/null || true)"
     if [ -n "$rip" ]; then
       if [[ "$rip" == *:* ]]; then
-        WAN6="$rip"
-        fill_by_ipinfo_ip 6 "$WAN6" || true
+        WAN6="$rip"; fill_by_ipinfo_ip 6 "$WAN6" || true
       else
-        WAN4="$rip"
-        fill_by_ipinfo_ip 4 "$WAN4" || true
+        WAN4="$rip"; fill_by_ipinfo_ip 4 "$WAN4" || true
       fi
     fi
   fi
