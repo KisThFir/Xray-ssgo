@@ -66,6 +66,9 @@ UUID_FALLBACK="$(cat /proc/sys/kernel/random/uuid)"
 CFIP=${CFIP:-'172.67.146.150'}
 SS_FIXED_IP="104.18.40.49"
 
+# 固定 sing-box 版本
+SB_FIXED_VER="v1.13.11"
+
 FREEFLOW_MODE="none"
 FF_PATH="/"
 RESTART_HOURS=0
@@ -289,7 +292,6 @@ apply_base_name(){
   [ -n "$isp" ] && BASE_FULL="${BASE_REGION} ${isp}" || BASE_FULL="$BASE_REGION"
 }
 
-# -------- 新IP检测：并发 + 主源cloudflare.now.cc + 回退ipify/ipinfo --------
 _G_CACHED_REALIP=""
 platform_get_realip() {
   [ -n "${_G_CACHED_REALIP:-}" ] && { printf '%s' "${_G_CACHED_REALIP}"; return 0; }
@@ -384,6 +386,15 @@ parse_cf_json(){
   return 0
 }
 
+# 优先 api64.ipify.org 获取公网 IPv6，失败再本地地址兜底
+get_local_ipv6_fallback(){
+  ip -6 addr show scope global 2>/dev/null \
+    | awk '/inet6/{print $2}' \
+    | cut -d/ -f1 \
+    | grep -v '^fe80:' \
+    | head -n1
+}
+
 check_ip(){
   [ "${IP_CHECKED:-0}" = "1" ] && return 0
 
@@ -392,33 +403,24 @@ check_ip(){
   ISP4=""; ISP6=""
   EMOJI4=""; EMOJI6=""
 
-  local IF4="" IF6="" L4="" L6="" BA4="" BA6=""
+  local IF4="" IF6="" L4="" BA4=""
   IF4="$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
   IF6="$(ip -6 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
 
   if [ -n "$IF4" ]; then
-  local L4
-  L4=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
-  [ -z "$L4" ] && L4=$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1)
-  [ -n "$L4" ] && BA4="--bind-address=$L4"
-fi
-
-  if [ -n "$IF6" ]; then
-  local L6
-  L6=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
-  
-  [ -z "$L6" ] && L6=$(ip -6 addr show "$IF6" 2>/dev/null | awk '/inet6 / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1)
-  [ -n "$L6" ] && BA6="--bind-address=$L6"
-fi
+    L4=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+    [ -z "$L4" ] && L4=$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1)
+    [ -n "$L4" ] && BA4="--bind-address=$L4"
+  fi
 
   local t4 t6 j4="" j6=""
   t4="$(mktemp 2>/dev/null || echo /tmp/ip4.$$)"
   t6="$(mktemp 2>/dev/null || echo /tmp/ip6.$$)"
 
-  # 主探测：cloudflare.now.cc（并发）
+  # 主探测：cloudflare.now.cc（IPv4绑定，IPv6不绑定避免源地址被固定错）
   (wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t4" 2>/dev/null || true) &
   local pid4=$!
-  (wget $BA6 -6 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t6" 2>/dev/null || true) &
+  (wget -6 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t6" 2>/dev/null || true) &
   local pid6=$!
 
   wait "$pid4" 2>/dev/null || true
@@ -431,19 +433,30 @@ fi
   parse_cf_json 4 "$j4" || true
   parse_cf_json 6 "$j6" || true
 
-  # 回退1：ipify拿IP，再ipinfo拿org/country
+  # 回退1：IPv4
   if [ -z "${WAN4:-}" ]; then
     local ip4=""
     ip4="$(curl -4 -sf --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     [ -n "$ip4" ] && fill_by_ipinfo_ip 4 "$ip4" || true
   fi
+
+  # 回退2：IPv6 优先 api64.ipify.org，失败本地 ip -6 addr
   if [ -z "${WAN6:-}" ]; then
     local ip6=""
-    ip6="$(curl -6 -sf --max-time 6 https://api6.ipify.org 2>/dev/null || true)"
-    [ -n "$ip6" ] && fill_by_ipinfo_ip 6 "$ip6" || true
+    ip6="$(curl -6 -sf --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
+    if [ -n "$ip6" ]; then
+      fill_by_ipinfo_ip 6 "$ip6" || true
+    else
+      ip6="$(get_local_ipv6_fallback || true)"
+      if [ -n "$ip6" ]; then
+        WAN6="$ip6"
+        # 本地兜底也尽量补国家/运营商
+        fill_by_ipinfo_ip 6 "$WAN6" || true
+      fi
+    fi
   fi
 
-  # 回退2：你那段realip兜底（防奇怪NAT）
+  # 回退3：双栈都空，走realip兜底
   if [ -z "${WAN4:-}" ] && [ -z "${WAN6:-}" ]; then
     local rip=""
     rip="$(platform_get_realip 2>/dev/null || true)"
@@ -575,6 +588,7 @@ build_v6_domains_json(){
   fi
   jq -nc --arg s "$d" '($s|split(",")|map(gsub("^\\s+|\\s+$";""))|map(select(length>0))|unique)'
 }
+
 apply_policy_xray(){
   [ -f "$XRAY_CONF" ] || return 0
   ensure_dns_rule
@@ -591,17 +605,49 @@ apply_policy_xray(){
     update_xray --argjson d "$arr" '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-route-rule"}]'
   fi
 }
+
+# --- sing-box DNS + 路由策略（兼容 1.13.11）---
 apply_policy_sbox(){
   [ -f "$SB_CONF" ] || return 0
   local arr
   arr="$(build_v6_domains_json)"
+
+  # 1) 保证 direct_ipv4 / direct_ipv6 两个出站存在，且 domain_resolver 指向 dns_cf
   jq '
     .outbounds |= (
       map(select(.tag!="direct_ipv4" and .tag!="direct_ipv6"))
-      + [{"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns4","strategy":"ipv4_only"}}]
-      + [{"type":"direct","tag":"direct_ipv6","domain_resolver":{"server":"dns4","strategy":"ipv6_only"}}]
-    )' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
+      + [{
+          "type":"direct",
+          "tag":"direct_ipv4",
+          "domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}
+        }]
+      + [{
+          "type":"direct",
+          "tag":"direct_ipv6",
+          "domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}
+        }]
+    )
+  ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
 
+  # 2) 更新 DNS rules 中 v6-dns-rule（给 IPv6 列表域名用）
+  if [ "$(echo "$arr" | jq 'length')" -gt 0 ]; then
+    jq --argjson d "$arr" '
+      .dns = (.dns // {})
+      | .dns.rules = ((.dns.rules // []) | map(select(.tag!="v6-dns-rule")))
+      | .dns.rules += [{
+          "domain_suffix": $d,
+          "server": "dns_cf",
+          "tag": "v6-dns-rule"
+        }]
+    ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
+  else
+    jq '
+      .dns = (.dns // {})
+      | .dns.rules = ((.dns.rules // []) | map(select(.tag!="v6-dns-rule")))
+    ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
+  fi
+
+  # 3) 更新 route.rules 中 v6-route-rule
   if [ "$(echo "$arr" | jq 'length')" -gt 0 ]; then
     jq --argjson d "$arr" '
       .route = (.route // {})
@@ -617,6 +663,7 @@ apply_policy_sbox(){
     ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
   fi
 }
+
 apply_policy_all(){
   apply_policy_xray || true
   apply_policy_sbox || true
@@ -972,8 +1019,10 @@ install_sbox_core(){
     local sf ver url tgz
     sf="$(detect_singbox_suffix)"
     [ -z "$sf" ] && { red "架构不支持sing-box"; return 1; }
-    ver="$(wget -qO- "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name // empty')"
-    [ -z "$ver" ] && { red "获取sing-box版本失败"; return 1; }
+
+    # 固定版本
+    ver="$SB_FIXED_VER"
+
     tgz="${SB}/sing-box.tar.gz"
     url="https://github.com/SagerNet/sing-box/releases/download/${ver}/sing-box-${ver#v}${sf}.tar.gz"
     smart_download "$tgz" "$url" 5000000 || { red "下载sing-box失败"; return 1; }
@@ -982,7 +1031,7 @@ install_sbox_core(){
     chmod +x "$SB_BIN"
     rm -rf "$tgz" "${SB}/sing-box-${ver#v}${sf}"
   fi
-  green "sing-box 已安装"
+  green "sing-box 已安装（固定版本 ${SB_FIXED_VER}）"
 }
 ensure_acme(){
   [ -x "$HOME/.acme.sh/acme.sh" ] && return 0
@@ -1017,23 +1066,96 @@ open_port(){
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
 }
+
+# 构造 sing-box 1.13.11 的 DNS servers（多DoH）
+build_sbox_dns_servers_json(){
+  jq -nc '[
+    {
+      "type":"https",
+      "tag":"dns_cf",
+      "server":"1.1.1.1",
+      "server_port":443,
+      "path":"/dns-query",
+      "detour":"direct_ipv4"
+    },
+    {
+      "type":"https",
+      "tag":"dns_gg",
+      "server":"8.8.8.8",
+      "server_port":443,
+      "path":"/dns-query",
+      "detour":"direct_ipv4"
+    },
+    {
+      "type":"https",
+      "tag":"dns_q9",
+      "server":"9.9.9.9",
+      "server_port":443,
+      "path":"/dns-query",
+      "detour":"direct_ipv4"
+    }
+  ]'
+}
+
 write_tuic_conf(){
   local domain="$1" port="$2" cc="$3" uuid="$4"
   local crt="${TLS_DIR}/${domain}.crt" key="${TLS_DIR}/${domain}.key"
+  local v6_arr dns_servers dns_rules_json route_rules_json
+  v6_arr="$(build_v6_domains_json)"
+  dns_servers="$(build_sbox_dns_servers_json)"
+
+  if [ "$(echo "$v6_arr" | jq 'length')" -gt 0 ]; then
+    dns_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain_suffix":$d,"server":"dns_cf","tag":"v6-dns-rule"}]')"
+    route_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain":$d,"outbound":"direct_ipv6","tag":"v6-route-rule"}]')"
+  else
+    dns_rules_json='[]'
+    route_rules_json='[]'
+  fi
+
   cat > "$SB_CONF" <<EOF
 {
   "log": {"disabled": false, "level": "info", "timestamp": true},
-  "dns": {"servers": [{"type":"udp","tag":"dns4","server":"1.1.1.1"}]},
+  "dns": {
+    "servers": ${dns_servers},
+    "rules": ${dns_rules_json},
+    "final": "dns_cf",
+    "strategy": "ipv4_only",
+    "independent_cache": true,
+    "cache_capacity": 8192
+  },
   "inbounds": [
     {
-      "type":"tuic","listen":"::","tag":"tuic-in","listen_port":${port},
+      "type":"tuic",
+      "listen":"::",
+      "tag":"tuic-in",
+      "listen_port":${port},
       "users":[{"uuid":"${uuid}","password":"${uuid}"}],
       "congestion_control":"${cc}",
-      "tls":{"enabled":true,"server_name":"${domain}","alpn":["h3"],"certificate_path":"${crt}","key_path":"${key}"}
+      "tls":{
+        "enabled":true,
+        "server_name":"${domain}",
+        "alpn":["h3"],
+        "certificate_path":"${crt}",
+        "key_path":"${key}"
+      }
     }
   ],
-  "outbounds":[{"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns4","strategy":"ipv4_only"}}],
-  "route":{"final":"direct_ipv4"}
+  "outbounds":[
+    {
+      "type":"direct",
+      "tag":"direct_ipv4",
+      "domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}
+    },
+    {
+      "type":"direct",
+      "tag":"direct_ipv6",
+      "domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}
+    }
+  ],
+  "route":{
+    "rules": ${route_rules_json},
+    "final":"direct_ipv4"
+  }
 }
 EOF
 }
@@ -1065,6 +1187,12 @@ EOF
   svc enable tuic-box
 }
 start_tuic_check(){
+  # 启动前先校验配置
+  if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check.log 2>&1; then
+    red "sing-box 配置校验失败"
+    tail -n 80 /tmp/sb_check.log 2>/dev/null || true
+    return 1
+  fi
   svc restart tuic-box
   sleep 1
   if is_running tuic-box; then return 0; fi
@@ -1100,7 +1228,7 @@ install_tuic(){
   start_tuic_check || return 1
   mkdir -p "$SB"
   printf '%s|%s|%s|%s\n' "$port" "$cc" "$domain" "$uuid" > "$SB_STATE"
-  green "Tuic 安装成功"
+  green "Tuic 安装成功（sing-box ${SB_FIXED_VER}）"
 }
 show_tuic_node(){
   cls
@@ -1459,7 +1587,7 @@ main_menu(){
     echo -e "v6 : ${u6}"
     echo -e "Mem: \033[1;36m${mem}\033[0m"
     echo "-----------------------------------------------"
-    
+
     printf "%b\n" "${C_MANAGE} 1.${C_RST} 管理${C_XRAY}Xray${C_RST}           ${C_MANAGE} 5.${C_RST} 管理${C_SWAP}SWAP${C_RST}"
     printf "%b\n" "${C_MANAGE} 2.${C_RST} 管理${C_SBOX}Sbox${C_RST}           ${C_MANAGE} 6.${C_RST} 创建${C_SHORTCUT}快捷${C_RST}"
     printf "%b\n" "${C_MANAGE} 3.${C_RST} 管理${C_OUTBOUND}出站${C_RST}           ${C_BAD} 9.${C_RST} ${C_BAD}彻底卸载${C_RST}"
