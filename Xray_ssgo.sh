@@ -289,155 +289,173 @@ apply_base_name(){
   [ -n "$isp" ] && BASE_FULL="${BASE_REGION} ${isp}" || BASE_FULL="$BASE_REGION"
 }
 
-# -------- IPv4/IPv6 检测（增强：多源+回退，NAT环境更稳）--------
-get_ip_json_via_curl(){
-  local fam="$1" extra="$2" url="$3"
-  if [ "$fam" = "4" ]; then
-    curl -4 -fsSL --connect-timeout 4 --max-time 8 $extra "$url" 2>/dev/null || true
+# -------- 新IP检测：并发 + 主源cloudflare.now.cc + 回退ipify/ipinfo --------
+_G_CACHED_REALIP=""
+platform_get_realip() {
+  [ -n "${_G_CACHED_REALIP:-}" ] && { printf '%s' "${_G_CACHED_REALIP}"; return 0; }
+  local _ip _v6 _org _res=""
+  _ip="$(curl -4 -sf --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  if [ -n "${_ip:-}" ]; then
+    _org="$(curl -sf --max-time 5 "https://ipinfo.io/${_ip}/org" 2>/dev/null || true)"
+    if printf '%s' "${_org:-}" | grep -qiE 'Cloudflare|UnReal|AEZA|Andrei'; then
+      _v6="$(curl -6 -sf --max-time 5 https://api6.ipify.org 2>/dev/null || true)"
+      [ -n "${_v6:-}" ] && _res="${_v6}" || _res="${_ip}"
+    else
+      _res="${_ip}"
+    fi
   else
-    curl -6 -fsSL --connect-timeout 5 --max-time 10 $extra "$url" 2>/dev/null || true
+    _v6="$(curl -6 -sf --max-time 5 https://api6.ipify.org 2>/dev/null || true)"
+    [ -n "${_v6:-}" ] && _res="${_v6}"
   fi
+  _G_CACHED_REALIP="${_res}"
+  printf '%s' "${_G_CACHED_REALIP}"
 }
-get_ip_json_via_wget(){
-  local fam="$1" extra="$2" url="$3"
-  if [ "$fam" = "4" ]; then
-    wget -4 -qO- --no-check-certificate --tries=1 --timeout=6 $extra "$url" 2>/dev/null || true
-  else
-    wget -6 -qO- --no-check-certificate --tries=1 --timeout=8 $extra "$url" 2>/dev/null || true
+
+fill_by_ipinfo_ip(){
+  local fam="$1" ip="$2"
+  [ -z "$ip" ] && return 1
+  local j cc org
+  j="$(curl -sf --max-time 6 "https://ipinfo.io/${ip}/json" 2>/dev/null || true)"
+  if [ -z "$j" ] || ! echo "$j" | jq -e '.ip' >/dev/null 2>&1; then
+    org="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/org" 2>/dev/null || true)"
+    cc="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/country" 2>/dev/null || true)"
+    if [ "$fam" = "4" ]; then
+      WAN4="$ip"
+      COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+      EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
+      ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
+    else
+      WAN6="$ip"
+      COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+      EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
+      ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
+    fi
+    return 0
   fi
-}
-is_valid_ip_json(){
-  local j="$1" fam="$2"
-  [ -n "$j" ] || return 1
-  echo "$j" | jq -e '.ip' >/dev/null 2>&1 || return 1
-  local ip
-  ip="$(echo "$j" | jq -r '.ip // empty')"
-  [ -n "$ip" ] || return 1
-  if [ "$fam" = "6" ]; then
-    [[ "$ip" == *:* ]] || return 1
+
+  cc="$(echo "$j" | jq -r '.country // empty' 2>/dev/null || true)"
+  org="$(echo "$j" | jq -r '.org // empty' 2>/dev/null || true)"
+
+  if [ "$fam" = "4" ]; then
+    WAN4="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
+    COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+    EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
+    ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
   else
-    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    WAN6="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
+    COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+    EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
+    ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
   fi
   return 0
 }
-extract_ip_fields(){
-  local json="$1" fam="$2"
-  local cc org comp host ip
-  ip="$(echo "$json" | jq -r '.ip // empty')"
-  cc="$(echo "$json" | jq -r '.country // empty')"
-  org="$(echo "$json" | jq -r '.org // empty')"
-  comp="$(echo "$json" | jq -r '.company.name // empty')"
-  host="$(echo "$json" | jq -r '.hostname // empty')"
+
+parse_cf_json(){
+  local fam="$1" j="$2"
+  [ -z "$j" ] && return 1
+  echo "$j" | jq -e '.ip' >/dev/null 2>&1 || return 1
+
+  local ip cc emo asn isp
+  ip="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
+  cc="$(echo "$j" | jq -r '.country // empty' 2>/dev/null || true)"
+  emo="$(echo "$j" | jq -r '.emoji // empty' 2>/dev/null || true)"
+  asn="$(echo "$j" | jq -r '.asn // empty' 2>/dev/null || true)"
+  isp="$(echo "$j" | jq -r '.isp // empty' 2>/dev/null || true)"
+
+  [ -z "$ip" ] && return 1
 
   if [ "$fam" = "4" ]; then
     WAN4="$ip"
     COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
-    EMOJI4="$(country_flag "$cc")"
-    ISP4="$(clean_isp "$org")"
-    [ -z "$ISP4" ] && ISP4="$comp"
-    [ -z "$ISP4" ] && ISP4="$host"
+    EMOJI4="$emo"
+    [ -z "$EMOJI4" ] && EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
+    ISP4="$(clean_isp "${asn:+AS${asn} }${isp}")"
+    [ -z "$ISP4" ] && ISP4="$(clean_isp "$isp")"
     [ -z "$ISP4" ] && ISP4="unknown"
   else
     WAN6="$ip"
     COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
-    EMOJI6="$(country_flag "$cc")"
-    ISP6="$(clean_isp "$org")"
-    [ -z "$ISP6" ] && ISP6="$comp"
-    [ -z "$ISP6" ] && ISP6="$host"
+    EMOJI6="$emo"
+    [ -z "$EMOJI6" ] && EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
+    ISP6="$(clean_isp "${asn:+AS${asn} }${isp}")"
+    [ -z "$ISP6" ] && ISP6="$(clean_isp "$isp")"
     [ -z "$ISP6" ] && ISP6="unknown"
   fi
-}
-probe_ip_family(){
-  local fam="$1"
-  local ifn src extra j url
-
-  # 优先：不绑定（对部分NAT/策略路由环境更友好）
-  for url in \
-    "https://ipinfo.io/json" \
-    "https://api.ip.sb/geoip" \
-    "https://api.my-ip.io/v2/ip.json"
-  do
-    j="$(get_ip_json_via_curl "$fam" "" "$url")"
-    if is_valid_ip_json "$j" "$fam"; then
-      echo "$j"; return 0
-    fi
-  done
-
-  # 回退：wget 不绑定
-  for url in \
-    "https://ipinfo.io/json" \
-    "https://api.ip.sb/geoip" \
-    "https://api.my-ip.io/v2/ip.json"
-  do
-    j="$(get_ip_json_via_wget "$fam" "" "$url")"
-    if is_valid_ip_json "$j" "$fam"; then
-      echo "$j"; return 0
-    fi
-  done
-
-  # 再尝试：绑定默认路由接口的源地址/接口
-  if [ "$fam" = "4" ]; then
-    ifn="$(ip -4 route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
-    [ -n "$ifn" ] && src="$(ip -4 addr show "$ifn" 2>/dev/null | awk '/inet / && /global/ {print $2}' | head -n1 | cut -d/ -f1)" || src=""
-    extra=""
-    [ -n "$src" ] && extra="--interface ${src}"
-    [ -z "$extra" ] && [ -n "$ifn" ] && extra="--interface ${ifn}"
-  else
-    ifn="$(ip -6 route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
-    [ -n "$ifn" ] && src="$(ip -6 addr show "$ifn" 2>/dev/null | awk '/inet6 / && /global/ {print $2}' | head -n1 | cut -d/ -f1)" || src=""
-    extra=""
-    [ -n "$src" ] && extra="--interface ${src}"
-    [ -z "$extra" ] && [ -n "$ifn" ] && extra="--interface ${ifn}"
-  fi
-
-  if [ -n "$extra" ]; then
-    for url in \
-      "https://ipinfo.io/json" \
-      "https://api.ip.sb/geoip" \
-      "https://api.my-ip.io/v2/ip.json"
-    do
-      j="$(get_ip_json_via_curl "$fam" "$extra" "$url")"
-      if is_valid_ip_json "$j" "$fam"; then
-        echo "$j"; return 0
-      fi
-    done
-    for url in \
-      "https://ipinfo.io/json" \
-      "https://api.ip.sb/geoip" \
-      "https://api.my-ip.io/v2/ip.json"
-    do
-      j="$(get_ip_json_via_wget "$fam" "$extra" "$url")"
-      if is_valid_ip_json "$j" "$fam"; then
-        echo "$j"; return 0
-      fi
-    done
-  fi
-
-  return 1
+  return 0
 }
 
 check_ip(){
-  [ "$IP_CHECKED" = "1" ] && return
+  [ "${IP_CHECKED:-0}" = "1" ] && return 0
 
   WAN4=""; WAN6=""
   COUNTRY4=""; COUNTRY6=""
   ISP4=""; ISP6=""
   EMOJI4=""; EMOJI6=""
 
-  local j4 j6
-  j4="$(probe_ip_family 4 || true)"
-  j6="$(probe_ip_family 6 || true)"
+  local IF4="" IF6="" L4="" L6="" BA4="" BA6=""
+  IF4="$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
+  IF6="$(ip -6 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
 
-  if is_valid_ip_json "$j4" 4; then
-    extract_ip_fields "$j4" 4
+  if [ -n "$IF4" ]; then
+    L4="$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | head -n1 | cut -d/ -f1 || true)"
+    [ -n "$L4" ] && BA4="--bind-address=$L4"
   fi
-  if is_valid_ip_json "$j6" 6; then
-    extract_ip_fields "$j6" 6
+  if [ -n "$IF6" ]; then
+    L6="$(ip -6 addr show "$IF6" 2>/dev/null | awk '/inet6 / && /global/ {print $2}' | head -n1 | cut -d/ -f1 || true)"
+    [ -n "$L6" ] && BA6="--bind-address=$L6"
   fi
 
-  apply_base_name
+  local t4 t6 j4="" j6=""
+  t4="$(mktemp 2>/dev/null || echo /tmp/ip4.$$)"
+  t6="$(mktemp 2>/dev/null || echo /tmp/ip6.$$)"
+
+  # 主探测：cloudflare.now.cc（并发）
+  (wget $BA4 -4 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t4" 2>/dev/null || true) &
+  local pid4=$!
+  (wget $BA6 -6 -qO- --no-check-certificate --tries=2 --timeout=3 "https://ip.cloudflare.now.cc?lang=zh-CN" > "$t6" 2>/dev/null || true) &
+  local pid6=$!
+
+  wait "$pid4" 2>/dev/null || true
+  wait "$pid6" 2>/dev/null || true
+
+  j4="$(cat "$t4" 2>/dev/null || true)"
+  j6="$(cat "$t6" 2>/dev/null || true)"
+  rm -f "$t4" "$t6" >/dev/null 2>&1 || true
+
+  parse_cf_json 4 "$j4" || true
+  parse_cf_json 6 "$j6" || true
+
+  # 回退1：ipify拿IP，再ipinfo拿org/country
+  if [ -z "${WAN4:-}" ]; then
+    local ip4=""
+    ip4="$(curl -4 -sf --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    [ -n "$ip4" ] && fill_by_ipinfo_ip 4 "$ip4" || true
+  fi
+  if [ -z "${WAN6:-}" ]; then
+    local ip6=""
+    ip6="$(curl -6 -sf --max-time 6 https://api6.ipify.org 2>/dev/null || true)"
+    [ -n "$ip6" ] && fill_by_ipinfo_ip 6 "$ip6" || true
+  fi
+
+  # 回退2：你那段realip兜底（防奇怪NAT）
+  if [ -z "${WAN4:-}" ] && [ -z "${WAN6:-}" ]; then
+    local rip=""
+    rip="$(platform_get_realip 2>/dev/null || true)"
+    if [ -n "$rip" ]; then
+      if [[ "$rip" == *:* ]]; then
+        WAN6="$rip"
+        fill_by_ipinfo_ip 6 "$WAN6" || true
+      else
+        WAN4="$rip"
+        fill_by_ipinfo_ip 4 "$WAN4" || true
+      fi
+    fi
+  fi
+
+  apply_base_name || true
   IP_CHECKED=1
-  save_ip_cache
+  save_ip_cache || true
+  return 0
 }
 
 # ========== Xray ==========
@@ -1427,29 +1445,19 @@ main_menu(){
     info="$(sys_info)"
     mem="$(mem_used_disp)"
 
-    if [ -n "$WAN4" ]; then
-      u4="\033[1;36m${WAN4}  (${COUNTRY4} ${ISP4})\033[0m"
-    else
-      u4="${C_BAD}未检出${C_RST}"
-    fi
-
-    if [ -n "$WAN6" ]; then
-      u6="\033[1;36m${WAN6}  (${COUNTRY6} ${ISP6})\033[0m"
-    else
-      u6="${C_BAD}未检出${C_RST}"
-    fi
+    if [ -n "$WAN4" ]; then u4="\033[1;36m${WAN4}  (${COUNTRY4} ${ISP4})\033[0m"; else u4="${C_BAD}未检出${C_RST}"; fi
+    if [ -n "$WAN6" ]; then u6="\033[1;36m${WAN6}  (${COUNTRY6} ${ISP6})\033[0m"; else u6="${C_BAD}未检出${C_RST}"; fi
 
     echo -e "OS : \033[1;36m${info}\033[0m"
     echo -e "v4 : ${u4}"
     echo -e "v6 : ${u6}"
     echo -e "Mem: \033[1;36m${mem}\033[0m"
     echo "-----------------------------------------------"
-
-    # 首页颜色：管理/定时/创建 = 跟数字同色；xray=绿色；出站/重启=黄色
-    printf "%b\n" "${C_MANAGE} 1. 管理${C_RST}${C_XRAY}Xray${C_RST}           ${C_MANAGE} 5. 管理${C_RST}${C_SWAP}SWAP${C_RST}"
-    printf "%b\n" "${C_MANAGE} 2. 管理${C_RST}${C_SBOX}Sbox${C_RST}           ${C_MANAGE} 6. 创建${C_RST}${C_SHORTCUT}快捷${C_RST}"
-    printf "%b\n" "${C_MANAGE} 3. 管理${C_RST}${C_OUTBOUND}出站${C_RST}           ${C_MANAGE} 9.${C_RST} ${C_BAD}彻底卸载${C_RST}"
-    printf "%b\n" "${C_MANAGE} 4. 定时${C_RST}${C_RESTART}重启${C_RST}           ${C_BAD} 0.${C_RST} ${C_BAD}退出${C_RST}"
+    
+    printf "%b\n" "${C_MANAGE} 1.${C_RST} 管理${C_XRAY}Xray${C_RST}           ${C_MANAGE} 5.${C_RST} 管理${C_SWAP}SWAP${C_RST}"
+    printf "%b\n" "${C_MANAGE} 2.${C_RST} 管理${C_SBOX}Sbox${C_RST}           ${C_MANAGE} 6.${C_RST} 创建${C_SHORTCUT}快捷${C_RST}"
+    printf "%b\n" "${C_MANAGE} 3.${C_RST} 管理${C_OUTBOUND}出站${C_RST}           ${C_BAD} 9.${C_RST} ${C_BAD}彻底卸载${C_RST}"
+    printf "%b\n" "${C_MANAGE} 4.${C_RST} 定时${C_RESTART}重启${C_RST}           ${C_BAD} 0.${C_RST} ${C_BAD}退出${C_RST}"
 
     echo "==============================================="
     prompt "请选择: " c
