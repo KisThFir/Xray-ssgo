@@ -199,7 +199,6 @@ smart_download(){
       if wget --help 2>&1 | grep -q -- '--show-progress'; then
         wget -q --show-progress --timeout=30 --tries=1 -O "$out" "$url" || true
       else
-        # BusyBox wget
         wget -q -T 30 -O "$out" "$url" || true
       fi
     fi
@@ -402,21 +401,11 @@ parse_cf_json(){
   return 0
 }
 
-# 优先 api64.ipify.org 获取公网 IPv6，失败再本地地址兜底
-get_local_ipv6_fallback(){
-  ip -6 addr show scope global 2>/dev/null \
-    | awk '/inet6/{print $2}' \
-    | cut -d/ -f1 \
-    | grep -v '^fe80:' \
-    | head -n1
-}
-
+# 失败才本地 IPv6 兜底：先路由src，再全局地址
 get_local_ipv6_fallback(){
   local ip6=""
-  # 优先取路由实际源地址
-  ip6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
-  # 再回退全局地址
-  [ -z "$ip6" ] && ip6="$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | grep -v '^fe80:' | head -n1)"
+  ip6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
+  [ -z "$ip6" ] && ip6="$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | grep -v '^fe80:' | head -n1 || true)"
   echo "$ip6"
 }
 
@@ -428,23 +417,22 @@ check_ip(){
   ISP4=""; ISP6=""
   EMOJI4=""; EMOJI6=""
 
-  local IF4="" L4="" BA4=""
+  local IF4="" L4=""
   IF4="$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
 
   if [ -n "$IF4" ]; then
-    L4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
-    [ -z "$L4" ] && L4="$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1)"
-    [ -n "$L4" ] && BA4="--bind-address=$L4"
+    L4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
+    [ -z "$L4" ] && L4="$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1 || true)"
   fi
 
   # ========== 仅 IPv4 用 cloudflare.now.cc ==========
   local j4=""
-if [ -n "${L4:-}" ]; then
-  j4="$(curl -4 -sk --interface "$L4" --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
-else
-  j4="$(curl -4 -sk --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
-fi
-parse_cf_json 4 "$j4" || true
+  if [ -n "${L4:-}" ]; then
+    j4="$(curl -4 -sk --interface "$L4" --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
+  else
+    j4="$(curl -4 -sk --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
+  fi
+  parse_cf_json 4 "$j4" || true
 
   # IPv4 回退：ipify + ipinfo
   if [ -z "${WAN4:-}" ]; then
@@ -453,14 +441,13 @@ parse_cf_json 4 "$j4" || true
     [ -n "$ip4" ] && fill_by_ipinfo_ip 4 "$ip4" || true
   fi
 
-  # ========== IPv6 独立：优先 api64.ipify.org ==========
+  # ========== IPv6：优先 api64.ipify.org ==========
   local ip6=""
   ip6="$(curl -6 -sf --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
   if [ -n "$ip6" ]; then
     WAN6="$ip6"
     fill_by_ipinfo_ip 6 "$WAN6" || true
   else
-    # 失败才本地兜底
     ip6="$(get_local_ipv6_fallback || true)"
     if [ -n "$ip6" ]; then
       WAN6="$ip6"
@@ -616,13 +603,11 @@ apply_policy_xray(){
   fi
 }
 
-# --- sing-box DNS + 路由策略（兼容 1.13.11）---
 apply_policy_sbox(){
   [ -f "$SB_CONF" ] || return 0
   local arr
   arr="$(build_v6_domains_json)"
 
-  # 1) 保证 direct_ipv4 / direct_ipv6 两个出站存在，且 domain_resolver 指向 dns_cf
   jq '
     .outbounds |= (
       map(select(.tag!="direct_ipv4" and .tag!="direct_ipv6"))
@@ -639,7 +624,6 @@ apply_policy_sbox(){
     )
   ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
 
-  # 2) 更新 DNS rules 中 v6-dns-rule（给 IPv6 列表域名用）
   if [ "$(echo "$arr" | jq 'length')" -gt 0 ]; then
     jq --argjson d "$arr" '
       .dns = (.dns // {})
@@ -657,7 +641,6 @@ apply_policy_sbox(){
     ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
   fi
 
-  # 3) 更新 route.rules 中 v6-route-rule
   if [ "$(echo "$arr" | jq 'length')" -gt 0 ]; then
     jq --argjson d "$arr" '
       .route = (.route // {})
@@ -677,8 +660,18 @@ apply_policy_sbox(){
 apply_policy_all(){
   apply_policy_xray || true
   apply_policy_sbox || true
+
+  # 先校验 sbox，避免重启后挂死
+  if [ -x "$SB_BIN" ] && [ -f "$SB_CONF" ]; then
+    if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check_apply.log 2>&1; then
+      red "sing-box 配置校验失败，已跳过重启 tuic-box"
+      tail -n 50 /tmp/sb_check_apply.log 2>/dev/null || true
+    else
+      service_exists tuic-box && svc restart tuic-box
+    fi
+  fi
+
   service_exists xray && svc restart xray
-  service_exists tuic-box && svc restart tuic-box
   green "出站规则已应用（Xray + Sbox）"
 }
 
@@ -806,7 +799,7 @@ uninstall_argo(){
 show_xray_nodes(){
   cls
   [ "$IP_CHECKED" = "1" ] || load_ip_cache >/dev/null 2>&1 || true
-  [ "$IP_CHECKED" = "1" ] || check_ip
+  [ "$IP_CHECKED" = "1" ] || check_ip || true
   [ -f "$XRAY_CONF" ] || { red "xray未安装"; return; }
 
   local ip="" uuid cnt=0
@@ -837,7 +830,6 @@ show_xray_nodes(){
     fi
   fi
 
-  # freeflow
   if [ -f "$FREEFLOW_CONF" ]; then
     local f1 f2
     f1="$(sed -n '1p' "$FREEFLOW_CONF" 2>/dev/null || true)"
@@ -852,7 +844,6 @@ show_xray_nodes(){
     fi
   fi
 
-  # socks
   local sl
   sl="$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$XRAY_CONF" 2>/dev/null || true)"
   if [ -n "$sl" ] && [ -n "$ip" ]; then
@@ -1030,9 +1021,7 @@ install_sbox_core(){
     sf="$(detect_singbox_suffix)"
     [ -z "$sf" ] && { red "架构不支持sing-box"; return 1; }
 
-    # 固定版本
     ver="$SB_FIXED_VER"
-
     tgz="${SB}/sing-box.tar.gz"
     url="https://github.com/SagerNet/sing-box/releases/download/${ver}/sing-box-${ver#v}${sf}.tar.gz"
     smart_download "$tgz" "$url" 5000000 || { red "下载sing-box失败"; return 1; }
@@ -1077,7 +1066,6 @@ open_port(){
   fi
 }
 
-# 构造 sing-box 1.13.11 的 DNS servers（多DoH）
 build_sbox_dns_servers_json(){
   jq -nc '[
     {
@@ -1197,7 +1185,6 @@ EOF
   svc enable tuic-box
 }
 start_tuic_check(){
-  # 启动前先校验配置
   if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check.log 2>&1; then
     red "sing-box 配置校验失败"
     tail -n 80 /tmp/sb_check.log 2>/dev/null || true
@@ -1439,13 +1426,13 @@ manage_outbound_menu(){
     echo "==============================================="
     prompt "请选择: " c
     case "$c" in
-      1) YOUTUBE_V6=1; save_outbound; green "已开启"; pause ;;
+      1) YOUTUBE_V6=1; save_outbound; apply_policy_all; green "已开启并应用"; pause ;;
       2)
         prompt "输入域名(逗号分隔): " s
         [ -z "$s" ] && { red "不能为空"; pause; continue; }
         [ -z "$V6_SITE_LIST" ] && V6_SITE_LIST="$s" || V6_SITE_LIST="${V6_SITE_LIST},${s}"
         V6_SITE_LIST="$(echo "$V6_SITE_LIST" | sed 's/,,*/,/g; s/^,//; s/,$//')"
-        save_outbound; green "已添加"; pause
+        save_outbound; apply_policy_all; green "已添加并应用"; pause
         ;;
       3)
         if [ -z "$V6_SITE_LIST" ]; then red "规则为空"; pause; continue; fi
@@ -1455,7 +1442,7 @@ manage_outbound_menu(){
         for d in "${arr[@]}"; do d="$(echo "$d" | sed 's/^ *//; s/ *$//')"; [ -z "$d" ] && continue; echo "  $i. $d"; i=$((i+1)); done
         echo "  a. 全部删除"; echo "  0. 取消"
         prompt "请输入序号或a: " idx
-        if [[ "$idx" =~ ^[aA]$ ]]; then V6_SITE_LIST=""; save_outbound; green "已全删"; pause; continue; fi
+        if [[ "$idx" =~ ^[aA]$ ]]; then V6_SITE_LIST=""; save_outbound; apply_policy_all; green "已全删并应用"; pause; continue; fi
         if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -le 0 ] || [ "$idx" -ge "$i" ]; then [ "$idx" = "0" ] && continue; red "序号无效"; pause; continue; fi
         local new="" j=1
         for d in "${arr[@]}"; do
@@ -1463,7 +1450,7 @@ manage_outbound_menu(){
           [ "$j" -ne "$idx" ] && { [ -z "$new" ] && new="$d" || new="${new},${d}"; }
           j=$((j+1))
         done
-        V6_SITE_LIST="$new"; save_outbound; green "已删除"; pause
+        V6_SITE_LIST="$new"; save_outbound; apply_policy_all; green "已删除并应用"; pause
         ;;
       4) apply_policy_all; pause ;;
       0) return ;;
@@ -1587,7 +1574,6 @@ sys_info(){
   disk="$(df -h / 2>/dev/null | awk 'NR==2{print $2}')"
   echo "${osv} | ${ker} | ${virt^^} | ${mem} | ${disk}"
 }
-
 mem_used_disp(){
   awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{u=t-a; if(t>1024*1024) printf "%.1fG/%.1fG",u/1024/1024,t/1024/1024; else printf "%.0fM/%.0fM",u/1024,t/1024}' /proc/meminfo 2>/dev/null
 }
@@ -1597,11 +1583,23 @@ main_menu(){
   mkdir -p "$WORK"
   load_state
   load_ip_cache >/dev/null 2>&1 || true
-  [ "$IP_CHECKED" = "1" ] || { cls; echo -e "\033[1;33mIP信息加载中，请稍候...\033[0m"; check_ip; }
+
+  [ "$IP_CHECKED" = "1" ] || {
+    cls
+    echo -e "\033[1;33mIP信息加载中，请稍候...\033[0m"
+    check_ip || {
+      red "IP检测失败，已跳过（不影响进入菜单）"
+      sleep 1
+    }
+  }
 
   while true; do
     cls
-    [ -f "$IPCACHE" ] && { local mt; mt=$(stat -c %Y "$IPCACHE" 2>/dev/null || echo 0); [ "$mt" -gt "${IP_CACHE_MTIME:-0}" ] && IP_CACHE_MTIME="$mt" && load_ip_cache >/dev/null 2>&1 || true; }
+    [ -f "$IPCACHE" ] && {
+      local mt
+      mt=$(stat -c %Y "$IPCACHE" 2>/dev/null || echo 0)
+      [ "$mt" -gt "${IP_CACHE_MTIME:-0}" ] && IP_CACHE_MTIME="$mt" && load_ip_cache >/dev/null 2>&1 || true
+    }
 
     local info mem u4 u6
     info="$(sys_info)"
