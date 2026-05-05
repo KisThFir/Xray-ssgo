@@ -66,7 +66,6 @@ UUID_FALLBACK="$(cat /proc/sys/kernel/random/uuid)"
 CFIP=${CFIP:-'172.67.146.150'}
 SS_FIXED_IP="104.18.40.49"
 
-# 固定 sing-box 版本
 SB_FIXED_VER="v1.13.11"
 
 FREEFLOW_MODE="none"
@@ -123,9 +122,8 @@ is_running(){
 }
 
 # ========== Package ==========
-need_cmd(){
-  command -v "$1" >/dev/null 2>&1
-}
+need_cmd(){ command -v "$1" >/dev/null 2>&1; }
+
 pkg_install(){
   local p
   for p in "$@"; do
@@ -137,10 +135,11 @@ pkg_install(){
     elif command -v yum >/dev/null 2>&1; then
       yum install -y "$p" >/dev/null 2>&1 || true
     elif command -v apk >/dev/null 2>&1; then
-      apk add "$p" >/dev/null 2>&1 || true
+      apk add --no-cache "$p" >/dev/null 2>&1 || true
     fi
   done
 }
+
 ensure_deps(){
   need_cmd jq || pkg_install jq
   need_cmd wget || pkg_install wget
@@ -149,6 +148,13 @@ ensure_deps(){
   need_cmd base64 || pkg_install coreutils
   need_cmd tar || pkg_install tar
   need_cmd unzip || pkg_install unzip
+  need_cmd openssl || pkg_install openssl
+  [ -f /etc/alpine-release ] && pkg_install ca-certificates || true
+
+  for c in jq wget curl ip base64 tar unzip openssl; do
+    command -v "$c" >/dev/null 2>&1 || { red "依赖缺失: $c"; return 1; }
+  done
+  return 0
 }
 
 # ========== Helpers ==========
@@ -173,11 +179,18 @@ detect_cloudflared_arch(){
     *) echo "" ;;
   esac
 }
+# 关键修复：Alpine 用 musl 包
 detect_singbox_suffix(){
   case "$(uname -m)" in
-    x86_64|amd64) echo "-linux-amd64" ;;
-    aarch64|arm64) echo "-linux-arm64" ;;
-    *) echo "" ;;
+    x86_64|amd64)
+      if is_alpine; then echo "-linux-amd64-musl"; else echo "-linux-amd64"; fi
+      ;;
+    aarch64|arm64)
+      if is_alpine; then echo "-linux-arm64-musl"; else echo "-linux-arm64"; fi
+      ;;
+    *)
+      echo ""
+      ;;
   esac
 }
 normalize_path(){ [ -z "${1:-}" ] && echo "/" || { case "$1" in /*) echo "$1" ;; *) echo "/$1" ;; esac; }; }
@@ -189,12 +202,10 @@ smart_download(){
   while [ "$t" -lt 3 ]; do
     rm -f "$out"
 
-    # 先用 curl（最稳）
     if command -v curl >/dev/null 2>&1; then
-      curl -L --connect-timeout 10 --max-time 60 -o "$out" "$url" >/dev/null 2>&1 || true
+      curl -L --connect-timeout 10 --max-time 120 -o "$out" "$url" >/dev/null 2>&1 || true
     fi
 
-    # curl 失败再用 wget（兼容 BusyBox）
     if [ ! -s "$out" ] && command -v wget >/dev/null 2>&1; then
       if wget --help 2>&1 | grep -q -- '--show-progress'; then
         wget -q --show-progress --timeout=30 --tries=1 -O "$out" "$url" || true
@@ -337,13 +348,11 @@ fill_by_ipinfo_ip(){
     org="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/org" 2>/dev/null || true)"
     cc="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/country" 2>/dev/null || true)"
     if [ "$fam" = "4" ]; then
-      WAN4="$ip"
-      COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+      WAN4="$ip"; COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
       EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
       ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
     else
-      WAN6="$ip"
-      COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+      WAN6="$ip"; COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
       EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
       ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
     fi
@@ -352,7 +361,6 @@ fill_by_ipinfo_ip(){
 
   cc="$(echo "$j" | jq -r '.country // empty' 2>/dev/null || true)"
   org="$(echo "$j" | jq -r '.org // empty' 2>/dev/null || true)"
-
   if [ "$fam" = "4" ]; then
     WAN4="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
     COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
@@ -364,7 +372,6 @@ fill_by_ipinfo_ip(){
     EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
     ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
   fi
-  return 0
 }
 
 parse_cf_json(){
@@ -378,30 +385,21 @@ parse_cf_json(){
   emo="$(echo "$j" | jq -r '.emoji // empty' 2>/dev/null || true)"
   asn="$(echo "$j" | jq -r '.asn // empty' 2>/dev/null || true)"
   isp="$(echo "$j" | jq -r '.isp // empty' 2>/dev/null || true)"
-
   [ -z "$ip" ] && return 1
 
   if [ "$fam" = "4" ]; then
-    WAN4="$ip"
-    COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
-    EMOJI4="$emo"
-    [ -z "$EMOJI4" ] && EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
-    ISP4="$(clean_isp "${asn:+AS${asn} }${isp}")"
-    [ -z "$ISP4" ] && ISP4="$(clean_isp "$isp")"
-    [ -z "$ISP4" ] && ISP4="unknown"
+    WAN4="$ip"; COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+    EMOJI4="$emo"; [ -z "$EMOJI4" ] && EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
+    ISP4="$(clean_isp "${asn:+AS${asn} }${isp}")"; [ -z "$ISP4" ] && ISP4="$(clean_isp "$isp")"; [ -z "$ISP4" ] && ISP4="unknown"
   else
-    WAN6="$ip"
-    COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
-    EMOJI6="$emo"
-    [ -z "$EMOJI6" ] && EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
-    ISP6="$(clean_isp "${asn:+AS${asn} }${isp}")"
-    [ -z "$ISP6" ] && ISP6="$(clean_isp "$isp")"
-    [ -z "$ISP6" ] && ISP6="unknown"
+    WAN6="$ip"; COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+    EMOJI6="$emo"; [ -z "$EMOJI6" ] && EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
+    ISP6="$(clean_isp "${asn:+AS${asn} }${isp}")"; [ -z "$ISP6" ] && ISP6="$(clean_isp "$isp")"; [ -z "$ISP6" ] && ISP6="unknown"
   fi
   return 0
 }
 
-# 失败才本地 IPv6 兜底：先路由src，再全局地址
+# v6 本地兜底：先 route src，再 global 地址
 get_local_ipv6_fallback(){
   local ip6=""
   ip6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
@@ -419,13 +417,12 @@ check_ip(){
 
   local IF4="" L4=""
   IF4="$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
-
   if [ -n "$IF4" ]; then
     L4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
     [ -z "$L4" ] && L4="$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1 || true)"
   fi
 
-  # ========== 仅 IPv4 用 cloudflare.now.cc ==========
+  # v4 走 cloudflare.now.cc
   local j4=""
   if [ -n "${L4:-}" ]; then
     j4="$(curl -4 -sk --interface "$L4" --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
@@ -434,14 +431,14 @@ check_ip(){
   fi
   parse_cf_json 4 "$j4" || true
 
-  # IPv4 回退：ipify + ipinfo
+  # v4 回退
   if [ -z "${WAN4:-}" ]; then
     local ip4=""
     ip4="$(curl -4 -sf --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     [ -n "$ip4" ] && fill_by_ipinfo_ip 4 "$ip4" || true
   fi
 
-  # ========== IPv6：优先 api64.ipify.org ==========
+  # v6 独立：优先 api64.ipify.org
   local ip6=""
   ip6="$(curl -6 -sf --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
   if [ -n "$ip6" ]; then
@@ -455,7 +452,7 @@ check_ip(){
     fi
   fi
 
-  # 双栈都失败，最后兜底
+  # 双栈都失败再兜底
   if [ -z "${WAN4:-}" ] && [ -z "${WAN6:-}" ]; then
     local rip=""
     rip="$(platform_get_realip 2>/dev/null || true)"
@@ -531,7 +528,7 @@ set_xray_uuid(){
   green "UUID已更新: $u"
 }
 install_xray(){
-  ensure_deps
+  ensure_deps || return 1
   mkdir -p "$WORK"
   init_xray_conf
   ensure_dns_rule
@@ -603,6 +600,7 @@ apply_policy_xray(){
   fi
 }
 
+# v1.13.11 兼容：不使用 dns.rules[].tag / route.rules[].tag
 apply_policy_sbox(){
   [ -f "$SB_CONF" ] || return 0
   local arr
@@ -627,31 +625,17 @@ apply_policy_sbox(){
   if [ "$(echo "$arr" | jq 'length')" -gt 0 ]; then
     jq --argjson d "$arr" '
       .dns = (.dns // {})
-      | .dns.rules = ((.dns.rules // []) | map(select(.tag!="v6-dns-rule")))
-      | .dns.rules += [{
-          "domain_suffix": $d,
-          "server": "dns_cf",
-          "tag": "v6-dns-rule"
-        }]
-    ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
-  else
-    jq '
-      .dns = (.dns // {})
-      | .dns.rules = ((.dns.rules // []) | map(select(.tag!="v6-dns-rule")))
-    ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
-  fi
-
-  if [ "$(echo "$arr" | jq 'length')" -gt 0 ]; then
-    jq --argjson d "$arr" '
-      .route = (.route // {})
-      | .route.rules = ((.route.rules // []) | map(select(.tag!="v6-route-rule")))
-      | .route.rules += [{"domain":$d,"outbound":"direct_ipv6","tag":"v6-route-rule"}]
+      | .dns.rules = [{"domain_suffix":$d,"server":"dns_cf"}]
+      | .route = (.route // {})
+      | .route.rules = [{"domain":$d,"outbound":"direct_ipv6"}]
       | .route.final = "direct_ipv4"
     ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
   else
     jq '
-      .route = (.route // {})
-      | .route.rules = ((.route.rules // []) | map(select(.tag!="v6-route-rule")))
+      .dns = (.dns // {})
+      | .dns.rules = []
+      | .route = (.route // {})
+      | .route.rules = []
       | .route.final = "direct_ipv4"
     ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
   fi
@@ -661,7 +645,6 @@ apply_policy_all(){
   apply_policy_xray || true
   apply_policy_sbox || true
 
-  # 先校验 sbox，避免重启后挂死
   if [ -x "$SB_BIN" ] && [ -f "$SB_CONF" ]; then
     if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check_apply.log 2>&1; then
       red "sing-box 配置校验失败，已跳过重启 tuic-box"
@@ -1014,7 +997,7 @@ manage_freeflow(){
 
 # ========== Tuic / sing-box ==========
 install_sbox_core(){
-  ensure_deps
+  ensure_deps || return 1
   mkdir -p "$SB" "$WORK"
   if [ ! -x "$SB_BIN" ]; then
     local sf ver url tgz
@@ -1033,28 +1016,44 @@ install_sbox_core(){
   green "sing-box 已安装（固定版本 ${SB_FIXED_VER}）"
 }
 ensure_acme(){
+  need_cmd openssl || pkg_install openssl
+  command -v openssl >/dev/null 2>&1 || { red "缺少 openssl，无法安装 acme.sh"; return 1; }
+
   [ -x "$HOME/.acme.sh/acme.sh" ] && return 0
+
   if ! command -v crontab >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then pkg_install cron; svc enable cron; svc start cron
-    elif command -v apk >/dev/null 2>&1; then pkg_install dcron; rc-service dcron start >/dev/null 2>&1 || true; rc-update add dcron default >/dev/null 2>&1 || true
-    else pkg_install cronie; svc enable crond; svc start crond; fi
+    if command -v apt-get >/dev/null 2>&1; then
+      pkg_install cron
+      svc enable cron; svc start cron
+    elif command -v apk >/dev/null 2>&1; then
+      pkg_install dcron
+      rc-service dcron start >/dev/null 2>&1 || true
+      rc-update add dcron default >/dev/null 2>&1 || true
+    else
+      pkg_install cronie
+      svc enable crond; svc start crond
+    fi
   fi
+
   yellow "安装 acme.sh..."
   curl -s https://get.acme.sh | sh >/tmp/acme_install.log 2>&1 || true
-  [ -x "$HOME/.acme.sh/acme.sh" ] || { red "acme.sh 安装失败"; tail -n 50 /tmp/acme_install.log 2>/dev/null; return 1; }
+  [ -x "$HOME/.acme.sh/acme.sh" ] || { red "acme.sh 安装失败"; tail -n 80 /tmp/acme_install.log 2>/dev/null || true; return 1; }
+  return 0
 }
 issue_cert_cf(){
   local d="$1" token="$2"
   local crt="${TLS_DIR}/${d}.crt" key="${TLS_DIR}/${d}.key"
   mkdir -p "$TLS_DIR"
   [ -s "$crt" ] && [ -s "$key" ] && { green "证书已存在: $d"; return 0; }
+
   ensure_acme || return 1
   export CF_Token="$token"
   yellow "申请证书: $d"
   "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-  "$HOME/.acme.sh/acme.sh" --issue -d "$d" --dns dns_cf -k ec-256 >/tmp/acme_issue.log 2>&1 || { red "签发失败"; tail -n 60 /tmp/acme_issue.log; return 1; }
+  "$HOME/.acme.sh/acme.sh" --issue -d "$d" --dns dns_cf -k ec-256 >/tmp/acme_issue.log 2>&1 || {
+    red "签发失败"; tail -n 80 /tmp/acme_issue.log 2>/dev/null || true; return 1; }
   "$HOME/.acme.sh/acme.sh" --installcert -d "$d" --fullchainpath "$crt" --keypath "$key" --ecc >/tmp/acme_installcert.log 2>&1 || true
-  [ -s "$crt" ] && [ -s "$key" ] || { red "安装证书失败"; tail -n 60 /tmp/acme_installcert.log; return 1; }
+  [ -s "$crt" ] && [ -s "$key" ] || { red "安装证书失败"; tail -n 80 /tmp/acme_installcert.log 2>/dev/null || true; return 1; }
   green "证书安装成功"
 }
 open_port(){
@@ -1068,30 +1067,9 @@ open_port(){
 
 build_sbox_dns_servers_json(){
   jq -nc '[
-    {
-      "type":"https",
-      "tag":"dns_cf",
-      "server":"1.1.1.1",
-      "server_port":443,
-      "path":"/dns-query",
-      "detour":"direct_ipv4"
-    },
-    {
-      "type":"https",
-      "tag":"dns_gg",
-      "server":"8.8.8.8",
-      "server_port":443,
-      "path":"/dns-query",
-      "detour":"direct_ipv4"
-    },
-    {
-      "type":"https",
-      "tag":"dns_q9",
-      "server":"9.9.9.9",
-      "server_port":443,
-      "path":"/dns-query",
-      "detour":"direct_ipv4"
-    }
+    {"type":"https","tag":"dns_cf","server":"1.1.1.1","server_port":443,"path":"/dns-query","detour":"direct_ipv4"},
+    {"type":"https","tag":"dns_gg","server":"8.8.8.8","server_port":443,"path":"/dns-query","detour":"direct_ipv4"},
+    {"type":"https","tag":"dns_q9","server":"9.9.9.9","server_port":443,"path":"/dns-query","detour":"direct_ipv4"}
   ]'
 }
 
@@ -1103,8 +1081,8 @@ write_tuic_conf(){
   dns_servers="$(build_sbox_dns_servers_json)"
 
   if [ "$(echo "$v6_arr" | jq 'length')" -gt 0 ]; then
-    dns_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain_suffix":$d,"server":"dns_cf","tag":"v6-dns-rule"}]')"
-    route_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain":$d,"outbound":"direct_ipv6","tag":"v6-route-rule"}]')"
+    dns_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain_suffix":$d,"server":"dns_cf"}]')"
+    route_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain":$d,"outbound":"direct_ipv6"}]')"
   else
     dns_rules_json='[]'
     route_rules_json='[]'
@@ -1139,24 +1117,14 @@ write_tuic_conf(){
     }
   ],
   "outbounds":[
-    {
-      "type":"direct",
-      "tag":"direct_ipv4",
-      "domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}
-    },
-    {
-      "type":"direct",
-      "tag":"direct_ipv6",
-      "domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}
-    }
+    {"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}},
+    {"type":"direct","tag":"direct_ipv6","domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}}
   ],
-  "route":{
-    "rules": ${route_rules_json},
-    "final":"direct_ipv4"
-  }
+  "route":{"rules": ${route_rules_json},"final":"direct_ipv4"}
 }
 EOF
 }
+
 ensure_tuic_service(){
   if service_exists tuic-box; then return; fi
   if is_alpine; then
@@ -1195,7 +1163,7 @@ start_tuic_check(){
   if is_running tuic-box; then return 0; fi
   red "Tuic 启动失败"
   if is_alpine; then rc-service tuic-box status 2>/dev/null || true
-  else journalctl -u tuic-box -n 60 --no-pager || true; fi
+  else journalctl -u tuic-box -n 80 --no-pager || true; fi
   return 1
 }
 install_tuic(){
@@ -1579,7 +1547,7 @@ mem_used_disp(){
 }
 
 main_menu(){
-  ensure_deps
+  ensure_deps || { red "依赖安装失败，请检查网络/源"; exit 1; }
   mkdir -p "$WORK"
   load_state
   load_ip_cache >/dev/null 2>&1 || true
@@ -1587,10 +1555,7 @@ main_menu(){
   [ "$IP_CHECKED" = "1" ] || {
     cls
     echo -e "\033[1;33mIP信息加载中，请稍候...\033[0m"
-    check_ip || {
-      red "IP检测失败，已跳过（不影响进入菜单）"
-      sleep 1
-    }
+    check_ip || { red "IP检测失败，已跳过（不影响进入菜单）"; sleep 1; }
   }
 
   while true; do
