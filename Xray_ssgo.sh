@@ -26,37 +26,40 @@ url_encode(){ jq -rn --arg x "$1" '$x|@uri'; }
 
 # ========== Smart Menu Render ==========
 C_NUM="\033[1;36m"
-C_TXT="\033[0;37m"
+C_TXT="$C_RST"     # 基础文本颜色=终端默认色（Alpine 终端自然色）
 
+# 高亮池：排除白色
 KW_POOL=("\033[1;32m" "\033[1;35m" "\033[1;36m" "\033[1;33m")
 _LAST_KW_IDX=-1
 
 pick_kw_color(){
   local idx=$((RANDOM % ${#KW_POOL[@]}))
-  [ "$idx" -eq "$_LAST_KW_IDX" ] && idx=$(((idx+1) % ${#KW_POOL[@]}))
+  [ "$idx" -eq "$_LAST_KW_IDX" ] && idx=$(((idx + 1) % ${#KW_POOL[@]}))
   _LAST_KW_IDX="$idx"
   printf '%b' "${KW_POOL[$idx]}"
 }
 
 auto_hl(){
   local s="$1"
-  local pre kw c
+  local pre kw c left right
 
+  # 返回/退出固定红色
   case "$s" in
     返回|退出)
       printf "%b%s%b" "$C_BAD" "$s" "$C_RST"; return
       ;;
   esac
 
-  case "$s" in
-    卸载*)
-      pre="卸载"; kw="${s#卸载}"
-      [ -z "$kw" ] && { printf "%b%s%b" "$C_BAD" "$s" "$C_RST"; return; }
-      printf "%b%s%b%b%s%b" "$C_BAD" "$pre" "$C_RST" "$C_BAD" "$kw" "$C_RST"
-      return
-      ;;
-  esac
+  # 任何包含“卸载”的文本都高危红色处理
+  if [[ "$s" == *卸载* ]]; then
+    # 尽量仅把“卸载”及对象标红；前缀普通
+    left="${s%%卸载*}"
+    right="${s#*卸载}"
+    printf "%b%s%b%b卸载%s%b" "$C_TXT" "$left" "$C_RST" "$C_BAD" "$right" "$C_RST"
+    return
+  fi
 
+  # 动作词 + 关键对象词
   for pre in 管理 安装 查看 修改 重启 设置 创建 实时 配置 启用 关闭 删除 添加 定时 彻底; do
     if [[ "$s" == ${pre}* ]]; then
       kw="${s#$pre}"
@@ -67,6 +70,7 @@ auto_hl(){
     fi
   done
 
+  # 默认整词高亮
   c="$(pick_kw_color)"
   printf "%b%s%b" "$c" "$s" "$C_RST"
 }
@@ -76,7 +80,7 @@ menu_row2_auto(){
   local left right
   left=$(printf "%b%2s.%b %s" "$C_NUM" "$lnum" "$C_RST" "$(auto_hl "$ltxt")")
   right=$(printf "%b%2s.%b %s" "$C_NUM" "$rnum" "$C_RST" "$(auto_hl "$rtxt")")
-  printf "%-46b%s\n" "$left" "$right"
+  printf "%-54b%s\n" "$left" "$right"    # 加宽列间距
 }
 
 menu_item_auto(){
@@ -538,7 +542,7 @@ check_ip(){
   return 0
 }
 
-# ========== Domain helpers ==========
+# ========== 输出策略 ==========
 normalize_domain_item(){
   local s="$1"
   s="${s#http://}"; s="${s#https://}"
@@ -583,109 +587,6 @@ yt_mode_str(){
   esac
 }
 
-# ========== Xray ==========
-init_xray_conf(){
-  mkdir -p "$WORK"
-  [ -f "$XRAY_CONF" ] && return
-  cat > "$XRAY_CONF" <<'EOF'
-{
-  "log": { "access": "/dev/null", "error": "/dev/null", "loglevel": "none" },
-  "dns": {
-    "servers": [
-      { "address": "https+local://1.1.1.1/dns-query", "queryStrategy": "UseIPv4" },
-      { "address": "https+local://8.8.8.8/dns-query", "queryStrategy": "UseIPv4" }
-    ],
-    "queryStrategy": "UseIPv4",
-    "enableParallelQuery": true,
-    "disableFallback": true,
-    "serveStale": true,
-    "serveExpiredTTL": 0
-  },
-  "inbounds": [],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct", "settings": { "domainStrategy": "UseIPv4" } },
-    { "protocol": "dns", "tag": "dns-out" }
-  ],
-  "routing": {
-    "rules": [
-      { "type": "field", "port": "53", "outboundTag": "dns-out" },
-      { "type": "field", "protocol": "dns", "outboundTag": "dns-out" }
-    ]
-  }
-}
-EOF
-}
-ensure_dns_rule(){
-  init_xray_conf
-  local has_dnsout
-  has_dnsout=$(jq '[.outbounds[]?.tag] | contains(["dns-out"])' "$XRAY_CONF" 2>/dev/null || echo false)
-  [ "$has_dnsout" = "true" ] || update_xray '.outbounds += [{"protocol":"dns","tag":"dns-out"}]'
-  jq -e '.routing' "$XRAY_CONF" >/dev/null 2>&1 || update_xray '.routing={"rules":[]}'
-  update_xray 'del(.routing.rules[]? | select(.port=="53" or .protocol=="dns"))'
-  update_xray '.routing.rules += [{"type":"field","port":"53","outboundTag":"dns-out"},{"type":"field","protocol":"dns","outboundTag":"dns-out"}]'
-}
-xray_uuid(){
-  if [ -f "$XRAY_CONF" ]; then
-    local u
-    u=$(jq -r '(first(.inbounds[]? | select(.protocol=="vless") | .settings.clients[0].id) // empty)' "$XRAY_CONF" 2>/dev/null || true)
-    [ -n "$u" ] && { echo "$u"; return; }
-  fi
-  echo "$UUID_FALLBACK"
-}
-set_xray_uuid(){
-  local u="$1"
-  [ -f "$XRAY_CONF" ] || { red "xray未安装"; return 1; }
-  update_xray --arg uuid "$u" '(.inbounds[]? | select(.protocol=="vless") | .settings.clients[0].id) |= $uuid'
-  svc restart xray
-  green "UUID已更新: $u"
-}
-install_xray(){
-  ensure_deps || return 1
-  mkdir -p "$WORK"
-  init_xray_conf
-  ensure_dns_rule
-
-  if [ ! -x "$XRAY_BIN" ]; then
-    local arch url
-    arch="$(detect_xray_arch)"
-    [ -z "$arch" ] && { red "架构不支持Xray"; return 1; }
-    url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${arch}.zip"
-    smart_download "${WORK}/xray.zip" "$url" 5000000 || { red "下载Xray失败"; return 1; }
-    unzip -o "${WORK}/xray.zip" -d "${WORK}/" >/dev/null 2>&1 || return 1
-    chmod +x "$XRAY_BIN"
-    rm -f "${WORK}/xray.zip" "${WORK}/geosite.dat" "${WORK}/geoip.dat" "${WORK}/README.md" "${WORK}/LICENSE"
-  fi
-
-  if ! service_exists xray; then
-    if is_alpine; then
-      cat > /etc/init.d/xray <<EOF
-#!/sbin/openrc-run
-description="Xray Service"
-command="${XRAY_BIN}"
-command_args="run -c ${XRAY_CONF}"
-command_background=true
-pidfile="/var/run/xray.pid"
-EOF
-      chmod +x /etc/init.d/xray
-    else
-      cat > /etc/systemd/system/xray.service <<EOF
-[Unit]
-Description=Xray Service
-After=network.target
-[Service]
-ExecStart=${XRAY_BIN} run -c ${XRAY_CONF}
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOF
-    fi
-    svc enable xray
-  fi
-  svc restart xray
-  green "Xray 安装完成"
-}
-
-# ========== Outbound apply ==========
 apply_policy_xray(){
   [ -f "$XRAY_CONF" ] || return 0
   ensure_dns_rule
@@ -774,989 +675,10 @@ apply_policy_all(){
   green "出站规则已应用（Xray + Sbox）"
 }
 
-# ========== Argo ==========
-install_argo(){
-  install_xray || return 1
-  ensure_dns_rule || return 1
-
-  if [ ! -x "${WORK}/argo" ]; then
-    local a u
-    a="$(detect_cloudflared_arch)"
-    [ -z "$a" ] && { red "架构不支持cloudflared"; return 1; }
-    u="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${a}"
-    smart_download "${WORK}/argo" "$u" 15000000 || { red "下载cloudflared失败"; return 1; }
-    chmod +x "${WORK}/argo"
-  fi
-
-  local domain auth ss_pass mc ss_method tunnel_id uuid
-  prompt "Argo域名: " domain
-  [ -z "$domain" ] && { red "不能为空"; return 1; }
-  prompt "Argo JSON凭证: " auth
-  echo "$auth" | grep -q "TunnelSecret" || { red "必须是JSON凭证"; return 1; }
-
-  prompt "SS密码(回车随机UUID): " ss_pass
-  [ -z "$ss_pass" ] && ss_pass="$(gen_uuid)"
-  prompt "SS加密(1:aes-128-gcm/2:aes-256-gcm): " mc
-  ss_method="aes-128-gcm"; [ "$mc" = "2" ] && ss_method="aes-256-gcm"
-
-  echo "$domain" > "$ARGO_DOMAIN"
-  tunnel_id="$(echo "$auth" | jq -r '.TunnelID' 2>/dev/null || true)"
-  [ -z "$tunnel_id" ] && tunnel_id="$(echo "$auth" | cut -d'"' -f12)"
-  echo "$auth" > "$ARGO_JSON"
-
-  cat > "$ARGO_YML" <<EOF
-tunnel: ${tunnel_id}
-credentials-file: ${ARGO_JSON}
-protocol: http2
-ingress:
-  - hostname: ${domain}
-    path: /argo
-    service: http://localhost:8080
-    originRequest: { noTLSVerify: true }
-  - hostname: ${domain}
-    path: /xgo
-    service: http://localhost:8081
-    originRequest: { noTLSVerify: true }
-  - hostname: ${domain}
-    path: /ssgo
-    service: http://localhost:8082
-    originRequest: { noTLSVerify: true }
-  - service: http_status:404
-EOF
-
-  uuid="$(xray_uuid)"
-  update_xray 'del(.inbounds[]? | select(.port==8080 or .port==8081 or .port==8082))'
-
-  local ws xh ss
-  ws='{"port":8080,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":"'"${uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/argo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
-  xh=$(jq -nc --arg uuid "$uuid" --arg mode "$XHTTP_MODE" --argjson extra "$XHTTP_EXTRA_JSON" \
-      '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}')
-  ss='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'"${ss_method}"'","password":"'"${ss_pass}"'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
-  update_xray --argjson ws "$ws" --argjson xh "$xh" --argjson ss "$ss" '.inbounds += [$ws,$xh,$ss]'
-
-  local cmd svcname="tunnel-argo"
-  cmd="${WORK}/argo tunnel --edge-ip-version auto --no-autoupdate --config ${ARGO_YML} run"
-  if ! service_exists "$svcname"; then
-    if is_alpine; then
-      cat > "${WORK}/argo_start.sh" <<EOF
-#!/bin/sh
-exec ${cmd}
-EOF
-      chmod +x "${WORK}/argo_start.sh"
-      cat > /etc/init.d/${svcname} <<EOF
-#!/sbin/openrc-run
-description="Cloudflare Tunnel"
-command="${WORK}/argo_start.sh"
-command_background=true
-pidfile="/var/run/${svcname}.pid"
-EOF
-      chmod +x /etc/init.d/${svcname}
-    else
-      cat > /etc/systemd/system/${svcname}.service <<EOF
-[Unit]
-Description=Cloudflare Tunnel
-After=network.target
-[Service]
-ExecStart=${cmd}
-Restart=always
-RestartSec=3
-[Install]
-WantedBy=multi-user.target
-EOF
-    fi
-    svc enable "$svcname"
-  fi
-
-  svc restart xray
-  svc restart "$svcname"
-  apply_policy_all || true
-  green "Argo 配置完成"
-}
-uninstall_argo(){
-  svc stop tunnel-argo
-  svc disable tunnel-argo
-  rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service "${WORK}/argo_start.sh" "${WORK}/argo"
-  rm -f "$ARGO_DOMAIN" "$ARGO_YML" "$ARGO_JSON"
-  if [ -f "$XRAY_CONF" ]; then
-    update_xray 'del(.inbounds[]? | select(.port==8080 or .port==8081 or .port==8082))'
-    svc restart xray
-  fi
-  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
-  green "Argo 已卸载"
-}
-
-# ========== HY2 on Xray ==========
-write_hy2_state(){
-  local port="$1" domain="$2" pass="$3" up="$4" down="$5" obfs="$6"
-  mkdir -p "$WORK"
-  {
-    echo "PORT=$port"
-    echo "DOMAIN=$domain"
-    echo "PASS=$pass"
-    echo "UP=$up"
-    echo "DOWN=$down"
-    echo "OBFS=$obfs"
-  } > "$HY2_STATE"
-}
-show_hy2_node(){
-  cls
-  if [ ! -f "$HY2_STATE" ]; then
-    red "HY2未安装"
-    return
-  fi
-  # shellcheck disable=SC1090
-  . "$HY2_STATE" 2>/dev/null || { red "HY2状态文件损坏"; return; }
-  [ -z "${PORT:-}" ] && { red "HY2状态不完整"; return; }
-  [ -z "${DOMAIN:-}" ] && { red "HY2状态不完整"; return; }
-  [ -z "${PASS:-}" ] && { red "HY2状态不完整"; return; }
-
-  local name link
-  [ -z "$BASE_FULL" ] && BASE_FULL="Node"
-  name="${BASE_FULL} - HY2"
-  link="hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}#$(url_encode "$name")"
-
-  green "=============== HY2 节点 ==============="
-  purple "$link"
-  echo "========================================="
-}
-install_hy2(){
-  install_xray || return 1
-  ensure_dns_rule || return 1
-
-  local domain token port pass obfs prof up down
-  prompt "HY2域名: " domain
-  [ -z "$domain" ] && { red "域名不能为空"; return 1; }
-  prompt "Cloudflare API Token: " token
-  [ -z "$token" ] && { red "Token不能为空"; return 1; }
-
-  prompt "HY2端口(默认24443): " port
-  [ -z "$port" ] && port=24443
-  [[ "$port" =~ ^[0-9]+$ ]] || { red "端口无效"; return 1; }
-
-  prompt "HY2密码(回车随机UUID): " pass
-  [ -z "$pass" ] && pass="$(gen_uuid)"
-
-  prompt "HY2混淆密码(回车随机UUID): " obfs
-  [ -z "$obfs" ] && obfs="$(gen_uuid)"
-
-  echo "带宽档位: 1.温和(50/100) 2.均衡(100/200) 3.激进(200/500) 4.自定义"
-  prompt "选择(默认1): " prof
-  case "$prof" in
-    2) up=100; down=200 ;;
-    3) up=200; down=500 ;;
-    4)
-      prompt "上行Mbps(默认100): " up
-      prompt "下行Mbps(默认200): " down
-      [ -z "$up" ] && up=100
-      [ -z "$down" ] && down=200
-      [[ "$up" =~ ^[0-9]+$ ]] || up=100
-      [[ "$down" =~ ^[0-9]+$ ]] || down=200
-      ;;
-    *) up=50; down=100 ;;
-  esac
-
-  issue_cert_cf "$domain" "$token" || return 1
-  open_port "$port" udp
-
-  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or .protocol=="hysteria2"))'
-
-  local hy2
-  hy2="$(jq -nc \
-    --argjson p "$port" \
-    --arg pass "$pass" \
-    --arg obfs "$obfs" \
-    --arg domain "$domain" \
-    --arg crt "${TLS_DIR}/${domain}.crt" \
-    --arg key "${TLS_DIR}/${domain}.key" \
-    --argjson up "$up" \
-    --argjson down "$down" \
-'{
-  "tag":"hy2-in",
-  "listen":"::",
-  "port":$p,
-  "protocol":"hysteria2",
-  "settings":{
-    "password":$pass,
-    "obfs":{"type":"salamander","password":$obfs}
-  },
-  "streamSettings":{
-    "network":"hy2",
-    "hy2Settings":{"upMbps":$up,"downMbps":$down},
-    "security":"tls",
-    "tlsSettings":{
-      "alpn":["h3"],
-      "certificates":[{"certificateFile":$crt,"keyFile":$key}],
-      "serverName":$domain
-    }
-  },
-  "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}
-}')"
-
-  update_xray --argjson ib "$hy2" '.inbounds += [$ib]'
-  svc restart xray
-
-  write_hy2_state "$port" "$domain" "$pass" "$up" "$down" "$obfs"
-  green "HY2 安装成功（Xray）"
-}
-uninstall_hy2(){
-  [ -f "$XRAY_CONF" ] || { red "xray未安装"; return 1; }
-  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or .protocol=="hysteria2"))'
-  rm -f "$HY2_STATE"
-  svc restart xray
-  green "HY2 已卸载"
-}
-
-# ========== Nodes ==========
-show_xray_nodes(){
-  cls
-  [ "$IP_CHECKED" = "1" ] || load_ip_cache >/dev/null 2>&1 || true
-  [ "$IP_CHECKED" = "1" ] || check_ip || true
-  [ -f "$XRAY_CONF" ] || { red "xray未安装"; return; }
-
-  local ip="" uuid cnt=0
-  [ -n "$WAN4" ] && ip="$WAN4" || ip="$WAN6"
-  uuid="$(xray_uuid)"
-  [ -z "$BASE_FULL" ] && BASE_FULL="Node"
-
-  green "=============== 节点链接 ================"
-
-  if [ -f "$ARGO_DOMAIN" ]; then
-    local d xextra nx nw ns
-    d="$(cat "$ARGO_DOMAIN")"
-    xextra="$(url_encode "$XHTTP_EXTRA_JSON")"
-    nx="${BASE_FULL} - ArgoXHTTP"
-    nw="${BASE_FULL} - ArgoWS"
-    ns="${BASE_FULL} - ArgoSS"
-    purple "vless://${uuid}@${CFIP}:443?encryption=none&security=tls&sni=${d}&alpn=h2&fp=chrome&type=xhttp&host=${d}&path=%2Fxgo&mode=${XHTTP_MODE}&extra=${xextra}#$(url_encode "$nx")"; echo
-    purple "vless://${uuid}@${CFIP}:443?encryption=none&security=tls&sni=${d}&fp=chrome&type=ws&host=${d}&path=%2Fargo%3Fed%3D2560#$(url_encode "$nw")"; echo
-    cnt=$((cnt+2))
-    local ssib
-    ssib="$(jq -c '.inbounds[]? | select(.protocol=="shadowsocks" and .port==8082)' "$XRAY_CONF" 2>/dev/null || true)"
-    if [ -n "$ssib" ]; then
-      local m pw b64
-      m="$(echo "$ssib" | jq -r '.settings.method')"
-      pw="$(echo "$ssib" | jq -r '.settings.password')"
-      b64="$(echo -n "${m}:${pw}" | base64 | tr -d '\n')"
-      purple "ss://${b64}@${SS_FIXED_IP}:80?type=ws&security=none&host=${d}&path=%2Fssgo#$(url_encode "$ns")"; echo
-      cnt=$((cnt+1))
-    fi
-  fi
-
-  if [ -f "$FREEFLOW_CONF" ]; then
-    local f1 f2
-    f1="$(sed -n '1p' "$FREEFLOW_CONF" 2>/dev/null || true)"
-    f2="$(sed -n '2p' "$FREEFLOW_CONF" 2>/dev/null || true)"
-    [ -z "$f2" ] && f2="/"
-    if [[ "$f1" =~ ^(ws|httpupgrade)$ ]] && [ -n "$ip" ]; then
-      local nm mode
-      mode="${f1^^}"; [ "$mode" = "HTTPUPGRADE" ] && mode="HTTP+"
-      nm="${BASE_FULL} - ${mode}"
-      purple "vless://${uuid}@${ip}:80?encryption=none&security=none&type=${f1}&host=${ip}&path=$(url_encode "$f2")#$(url_encode "$nm")"; echo
-      cnt=$((cnt+1))
-    fi
-  fi
-
-  local sl
-  sl="$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$XRAY_CONF" 2>/dev/null || true)"
-  if [ -n "$sl" ] && [ -n "$ip" ]; then
-    while read -r line; do
-      [ -z "$line" ] && continue
-      local p u pw n
-      p="$(echo "$line" | jq -r '.port')"
-      u="$(echo "$line" | jq -r '.settings.accounts[0].user')"
-      pw="$(echo "$line" | jq -r '.settings.accounts[0].pass')"
-      n="${BASE_FULL} - Socks5-${p}"
-      purple "socks5://${u}:${pw}@${ip}:${p}#$(url_encode "$n")"; echo
-      cnt=$((cnt+1))
-    done <<< "$sl"
-  fi
-
-  if [ -f "$HY2_STATE" ]; then
-    # shellcheck disable=SC1090
-    . "$HY2_STATE" 2>/dev/null || true
-    if [ -n "${PORT:-}" ] && [ -n "${DOMAIN:-}" ] && [ -n "${PASS:-}" ] && [ -n "${OBFS:-}" ]; then
-      local hn
-      hn="${BASE_FULL} - HY2"
-      purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}#$(url_encode "$hn")"; echo
-      cnt=$((cnt+1))
-    fi
-  fi
-
-  [ "$cnt" -eq 0 ] && yellow "暂无配置节点"
-  echo "=========================================="
-}
-
-# ========== Socks5 ==========
-manage_socks5(){
-  if [ ! -f "$XRAY_CONF" ]; then
-    cls
-    red "未检测到 Xray"
-    menu_item_auto "1" "安装Xray"
-    menu_item_auto "0" "返回"
-    prompt "请选择: " k
-    case "$k" in
-      1) install_xray || { red "安装失败"; pause; return; } ;;
-      0) return ;;
-      *) return ;;
-    esac
-  fi
-
-  ensure_dns_rule || { red "初始化失败"; pause; return; }
-
-  while true; do
-    cls
-    local list
-    list="$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$XRAY_CONF" 2>/dev/null || true)"
-    echo -e "${C_WARN}=============== Socks5管理 ===============${C_RST}"
-    if [ -z "$list" ]; then
-      echo -e "当前: ${C_BAD}未配置${C_RST}"
-    else
-      echo "-----------------------------------------------"
-      echo "  端口    | 用户名    | 密码"
-      echo "-----------------------------------------------"
-      while read -r line; do
-        [ -z "$line" ] && continue
-        printf "  %-8s| %-10s| %s\n" \
-          "$(echo "$line" | jq -r '.port')" \
-          "$(echo "$line" | jq -r '.settings.accounts[0].user')" \
-          "$(echo "$line" | jq -r '.settings.accounts[0].pass')"
-      done <<< "$list"
-    fi
-    echo "-----------------------------------------------"
-    menu_item_auto "1" "安装Socks5"
-    menu_item_auto "2" "修改Socks5"
-    menu_item_auto "3" "卸载Socks5"
-    menu_item_auto "0" "返回"
-    echo "==============================================="
-    prompt "请选择: " c
-    case "$c" in
-      1)
-        prompt "端口: " p; prompt "用户名: " u; prompt "密码: " pw
-        if [[ "$p" =~ ^[0-9]+$ && -n "$u" && -n "$pw" ]]; then
-          local ex
-          ex="$(jq --argjson p "$p" '[.inbounds[]? | select(.port==$p)] | length' "$XRAY_CONF")"
-          if [ "$ex" -gt 0 ]; then red "端口已存在"
-          else
-            update_xray --argjson p "$p" --arg u "$u" --arg pw "$pw" \
-              '.inbounds += [{"tag":("socks-"+($p|tostring)),"port":$p,"listen":"0.0.0.0","protocol":"socks","settings":{"auth":"password","accounts":[{"user":$u,"pass":$pw}],"udp":true},"sniffing":{"enabled":true,"destOverride":["http","tls"],"metadataOnly":false}}]'
-            svc restart xray; green "添加成功"
-          fi
-        else red "输入无效"; fi
-        pause
-        ;;
-      2)
-        prompt "端口: " p; prompt "新用户名: " u; prompt "新密码: " pw
-        if [[ "$p" =~ ^[0-9]+$ && -n "$u" && -n "$pw" ]]; then
-          update_xray --argjson p "$p" --arg u "$u" --arg pw "$pw" \
-            '(.inbounds[]? | select(.protocol=="socks" and .port==$p) | .settings.accounts[0]) |= {"user":$u,"pass":$pw}'
-          svc restart xray; green "修改成功"
-        else red "输入无效"; fi
-        pause
-        ;;
-      3)
-        if [ -z "$list" ]; then red "无可删项"; pause; continue; fi
-        local i=1; declare -a ports=()
-        while read -r line; do
-          [ -z "$line" ] && continue
-          local p; p="$(echo "$line" | jq -r '.port')"
-          echo "  ${i}. 端口 ${p}"; ports[$i]="$p"; i=$((i+1))
-        done <<< "$list"
-        echo "  0. 取消"
-        prompt "序号: " idx
-        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -gt 0 ] && [ "$idx" -lt "$i" ]; then
-          update_xray --argjson p "${ports[$idx]}" 'del(.inbounds[]? | select(.protocol=="socks" and .port==$p))'
-          svc restart xray; green "已删除"
-        fi
-        pause
-        ;;
-      0) return ;;
-      *) red "无效"; pause ;;
-    esac
-  done
-}
-
-# ========== Freeflow ==========
-apply_freeflow(){
-  [ -f "$XRAY_CONF" ] || { red "xray未安装"; return 1; }
-  ensure_dns_rule || return 1
-  local uuid ff
-  uuid="$(xray_uuid)"
-  update_xray 'del(.inbounds[]? | select(.tag=="ff-in"))'
-  if [ "$FREEFLOW_MODE" != "none" ]; then
-    ff='{"tag":"ff-in","port":80,"listen":"::","protocol":"vless","settings":{"clients":[{"id":"'"${uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"'"${FREEFLOW_MODE}"'","security":"none","'"${FREEFLOW_MODE}"'Settings":{"path":"'"${FF_PATH}"'"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"metadataOnly":false}}'
-    update_xray --argjson ib "$ff" '.inbounds += [$ib]'
-  fi
-  svc restart xray
-}
-manage_freeflow(){
-  if [ ! -f "$XRAY_CONF" ]; then
-    cls
-    red "未检测到 Xray"
-    menu_item_auto "1" "安装Xray"
-    menu_item_auto "0" "返回"
-    prompt "请选择: " k
-    case "$k" in
-      1) install_xray || { red "安装失败"; pause; return; } ;;
-      0) return ;;
-      *) return ;;
-    esac
-  fi
-
-  while true; do
-    cls
-    local s="${C_BAD}未配置${C_RST}"
-    if [ "$FREEFLOW_MODE" != "none" ]; then
-      local m="${FREEFLOW_MODE^^}"; [ "$m" = "HTTPUPGRADE" ] && m="HTTP+"
-      s="${C_WARN}${m}${C_RST} path=${FF_PATH}"
-    fi
-    echo -e "${C_WARN}=============== 免流管理 ===============${C_RST}"
-    printf "当前: %b\n" "$s"
-    echo "-----------------------------------------------"
-    menu_item_auto "1" "修改免流方式"
-    menu_item_auto "2" "修改免流路径"
-    menu_item_auto "3" "卸载免流"
-    menu_item_auto "0" "返回"
-    echo "==============================================="
-    prompt "请选择: " c
-    case "$c" in
-      1)
-        echo
-        green "请选择免流方式"
-        echo "-----------------------------------------------"
-        echo " 1. WS"
-        echo " 2. HTTPUpgrade"
-        echo " 3. 关闭"
-        echo "-----------------------------------------------"
-        prompt "请选择: " k
-        case "$k" in
-          1) FREEFLOW_MODE="ws" ;;
-          2) FREEFLOW_MODE="httpupgrade" ;;
-          *) FREEFLOW_MODE="none" ;;
-        esac
-        if [ "$FREEFLOW_MODE" != "none" ]; then
-          prompt "path(回车默认/): " p
-          FF_PATH="$(normalize_path "$p")"
-        else
-          FF_PATH="/"
-        fi
-        printf '%s\n%s\n' "$FREEFLOW_MODE" "$FF_PATH" > "$FREEFLOW_CONF"
-        apply_freeflow; green "已更新"; pause
-        ;;
-      2)
-        [ "$FREEFLOW_MODE" = "none" ] && { red "请先启用"; pause; continue; }
-        prompt "新path(回车保持): " p
-        [ -n "$p" ] && FF_PATH="$(normalize_path "$p")"
-        printf '%s\n%s\n' "$FREEFLOW_MODE" "$FF_PATH" > "$FREEFLOW_CONF"
-        apply_freeflow; green "路径已更新"; pause
-        ;;
-      3)
-        FREEFLOW_MODE="none"; FF_PATH="/"
-        printf '%s\n%s\n' "$FREEFLOW_MODE" "$FF_PATH" > "$FREEFLOW_CONF"
-        apply_freeflow; green "已卸载"; pause
-        ;;
-      0) return ;;
-      *) red "无效"; pause ;;
-    esac
-  done
-}
-
-# ========== sing-box / Tuic ==========
-install_sbox_core(){
-  ensure_deps || return 1
-  mkdir -p "$SB" "$WORK"
-  if [ ! -x "$SB_BIN" ]; then
-    local sf ver url tgz
-    sf="$(detect_singbox_suffix)"
-    [ -z "$sf" ] && { red "架构不支持sing-box"; return 1; }
-
-    ver="$SB_FIXED_VER"
-    tgz="${SB}/sing-box.tar.gz"
-    url="https://github.com/SagerNet/sing-box/releases/download/${ver}/sing-box-${ver#v}${sf}.tar.gz"
-    smart_download "$tgz" "$url" 5000000 || { red "下载sing-box失败"; return 1; }
-    tar -xzf "$tgz" -C "$SB" >/dev/null 2>&1 || return 1
-    mv "${SB}/sing-box-${ver#v}${sf}/sing-box" "$SB_BIN" 2>/dev/null || return 1
-    chmod +x "$SB_BIN"
-    rm -rf "$tgz" "${SB}/sing-box-${ver#v}${sf}"
-  fi
-  green "sing-box 已安装（固定版本 ${SB_FIXED_VER}）"
-}
-ensure_acme(){
-  need_cmd openssl || pkg_install openssl
-  command -v openssl >/dev/null 2>&1 || { red "缺少 openssl，无法安装 acme.sh"; return 1; }
-
-  [ -x "$HOME/.acme.sh/acme.sh" ] && return 0
-
-  if ! command -v crontab >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-      pkg_install cron
-      svc enable cron; svc start cron
-    elif command -v apk >/dev/null 2>&1; then
-      pkg_install dcron
-      rc-service dcron start >/dev/null 2>&1 || true
-      rc-update add dcron default >/dev/null 2>&1 || true
-    else
-      pkg_install cronie
-      svc enable crond; svc start crond
-    fi
-  fi
-
-  yellow "安装 acme.sh..."
-  curl -s https://get.acme.sh | sh >/tmp/acme_install.log 2>&1 || true
-  [ -x "$HOME/.acme.sh/acme.sh" ] || { red "acme.sh 安装失败"; tail -n 80 /tmp/acme_install.log 2>/dev/null || true; return 1; }
-}
-issue_cert_cf(){
-  local d="$1" token="$2"
-  local crt="${TLS_DIR}/${d}.crt" key="${TLS_DIR}/${d}.key"
-  mkdir -p "$TLS_DIR"
-  [ -s "$crt" ] && [ -s "$key" ] && { green "证书已存在: $d"; return 0; }
-
-  ensure_acme || return 1
-  export CF_Token="$token"
-  yellow "申请证书: $d"
-  "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-  "$HOME/.acme.sh/acme.sh" --issue -d "$d" --dns dns_cf -k ec-256 >/tmp/acme_issue.log 2>&1 || { red "签发失败"; tail -n 80 /tmp/acme_issue.log 2>/dev/null || true; return 1; }
-  "$HOME/.acme.sh/acme.sh" --installcert -d "$d" --fullchainpath "$crt" --keypath "$key" --ecc >/tmp/acme_installcert.log 2>&1 || true
-  [ -s "$crt" ] && [ -s "$key" ] || { red "安装证书失败"; tail -n 80 /tmp/acme_installcert.log 2>/dev/null || true; return 1; }
-  green "证书安装成功"
-}
-open_port(){
-  local p="$1" proto="${2:-tcp}"
-  command -v ufw >/dev/null 2>&1 && ufw allow "${p}/${proto}" >/dev/null 2>&1 || true
-  if command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --add-port="${p}/${proto}" --permanent >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
-}
-
-build_sbox_dns_servers_json(){
-  jq -nc '[
-    {"type":"https","tag":"dns_cf","server":"1.1.1.1","server_port":443,"path":"/dns-query","detour":"direct_ipv4"},
-    {"type":"https","tag":"dns_gg","server":"8.8.8.8","server_port":443,"path":"/dns-query","detour":"direct_ipv4"},
-    {"type":"https","tag":"dns_q9","server":"9.9.9.9","server_port":443,"path":"/dns-query","detour":"direct_ipv4"}
-  ]'
-}
-
-write_tuic_conf(){
-  local domain="$1" port="$2" cc="$3" uuid="$4"
-  local crt="${TLS_DIR}/${domain}.crt" key="${TLS_DIR}/${domain}.key"
-  local v6_compat v6_strict dns_servers dns_rules_json route_rules_json
-  v6_compat="$(build_v6_compat_domains_json)"
-  v6_strict="$(build_v6_strict_domains_json)"
-  dns_servers="$(build_sbox_dns_servers_json)"
-
-  dns_rules_json="$(jq -nc --argjson c "$v6_compat" --argjson s "$v6_strict" '
-    (if ($s|length)>0 then [{"domain_suffix":$s,"server":"dns_cf"}] else [] end)
-    +
-    (if ($c|length)>0 then [{"domain_suffix":$c,"server":"dns_cf"}] else [] end)
-  ')"
-
-  route_rules_json="$(jq -nc --argjson c "$v6_compat" --argjson s "$v6_strict" '
-    [{"action":"sniff"}]
-    +
-    (if ($s|length)>0 then [{"domain_suffix":$s,"ip_version":4,"action":"reject","method":"default"}] else [] end)
-    +
-    (if ($s|length)>0 then [{"domain_suffix":$s,"action":"route","outbound":"direct_ipv6"}] else [] end)
-    +
-    (if ($c|length)>0 then [{"domain_suffix":$c,"action":"route","outbound":"direct_ipv6"}] else [] end)
-  ')"
-
-  cat > "$SB_CONF" <<EOF
-{
-  "log": {"disabled": false, "level": "info", "timestamp": true},
-  "dns": {
-    "servers": ${dns_servers},
-    "rules": ${dns_rules_json},
-    "final": "dns_cf",
-    "strategy": "ipv4_only",
-    "independent_cache": true,
-    "cache_capacity": 8192
-  },
-  "inbounds": [
-    {
-      "type":"tuic",
-      "listen":"::",
-      "tag":"tuic-in",
-      "listen_port":${port},
-      "users":[{"uuid":"${uuid}","password":"${uuid}"}],
-      "congestion_control":"${cc}",
-      "tls":{
-        "enabled":true,
-        "server_name":"${domain}",
-        "alpn":["h3"],
-        "certificate_path":"${crt}",
-        "key_path":"${key}"
-      }
-    }
-  ],
-  "outbounds":[
-    {"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}},
-    {"type":"direct","tag":"direct_ipv6","domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}}
-  ],
-  "route":{"rules": ${route_rules_json},"final":"direct_ipv4"}
-}
-EOF
-}
-
-ensure_tuic_service(){
-  if service_exists tuic-box; then return; fi
-  if is_alpine; then
-    cat > /etc/init.d/tuic-box <<EOF
-#!/sbin/openrc-run
-description="Tuic by sing-box"
-command="${SB_BIN}"
-command_args="run -c ${SB_CONF}"
-command_background=true
-pidfile="/run/tuic-box.pid"
-EOF
-    chmod +x /etc/init.d/tuic-box
-  else
-    cat > /etc/systemd/system/tuic-box.service <<EOF
-[Unit]
-Description=Tuic by sing-box
-After=network.target
-[Service]
-ExecStart=${SB_BIN} run -c ${SB_CONF}
-Restart=always
-RestartSec=2
-[Install]
-WantedBy=multi-user.target
-EOF
-  fi
-  svc enable tuic-box
-}
-start_tuic_check(){
-  if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check.log 2>&1; then
-    red "sing-box 配置校验失败"
-    tail -n 80 /tmp/sb_check.log 2>/dev/null || true
-    return 1
-  fi
-  svc restart tuic-box
-  sleep 1
-  is_running tuic-box && return 0
-  red "Tuic 启动失败"
-  if is_alpine; then rc-service tuic-box status 2>/dev/null || true
-  else journalctl -u tuic-box -n 80 --no-pager || true; fi
-  return 1
-}
-install_tuic(){
-  install_sbox_core || return 1
-  local domain token port cc uuid def
-  prompt "Tuic域名: " domain; [ -z "$domain" ] && { red "域名不能为空"; return 1; }
-  prompt "Cloudflare API Token: " token; [ -z "$token" ] && { red "Token不能为空"; return 1; }
-  prompt "Tuic端口(默认18443): " port; [ -z "$port" ] && port=18443
-  [[ "$port" =~ ^[0-9]+$ ]] || { red "端口无效"; return 1; }
-
-  echo "拥塞算法: 1.bbr 2.cubic 3.new_reno"
-  prompt "选择(默认1): " s
-  case "$s" in 2) cc="cubic" ;; 3) cc="new_reno" ;; *) cc="bbr" ;; esac
-
-  def="$(xray_uuid)"
-  prompt "Tuic UUID(回车默认 ${def}): " uuid
-  [ -z "$uuid" ] && uuid="$def"
-
-  issue_cert_cf "$domain" "$token" || return 1
-  open_port "$port" udp
-  write_tuic_conf "$domain" "$port" "$cc" "$uuid"
-  ensure_tuic_service
-
-  apply_policy_sbox || true
-  start_tuic_check || return 1
-
-  mkdir -p "$SB"
-  printf '%s|%s|%s|%s\n' "$port" "$cc" "$domain" "$uuid" > "$SB_STATE"
-  green "Tuic 安装成功（sing-box ${SB_FIXED_VER}）"
-}
-show_tuic_node(){
-  cls
-  [ -f "$SB_STATE" ] || { red "Tuic未安装"; return; }
-  local port cc domain uuid
-  IFS='|' read -r port cc domain uuid < "$SB_STATE"
-  [ -z "$port" ] || [ -z "$domain" ] || [ -z "$uuid" ] && { red "Tuic状态文件不完整"; return; }
-  [ -z "$BASE_FULL" ] && BASE_FULL="Node"
-  local name link
-  name="${BASE_FULL} - Tuic"
-  link="tuic://${uuid}:${uuid}@${domain}:${port}?congestion_control=${cc:-bbr}&alpn=h3&sni=${domain}&udp_relay_mode=quic&allow_insecure=0#$(url_encode "$name")"
-  green "=============== Tuic 节点 ==============="
-  purple "$link"
-  echo "=========================================="
-}
-uninstall_tuic(){
-  svc stop tuic-box
-  svc disable tuic-box
-  rm -f /etc/init.d/tuic-box /etc/systemd/system/tuic-box.service
-  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
-  rm -rf "$SB"
-  green "Sbox 已卸载"
-}
-
-# ========== Foreground logs ==========
-foreground_sbox_log(){
-  [ -x "$SB_BIN" ] || { red "sing-box 未安装"; pause; return 1; }
-  [ -f "$SB_CONF" ] || { red "缺少配置: $SB_CONF"; pause; return 1; }
-
-  local bak="${SB_CONF}.bak.fg.$(date +%s)"
-  cp -a "$SB_CONF" "$bak"
-
-  if ! jq '.log.disabled=false | .log.level="debug" | .log.timestamp=true' "$SB_CONF" > "${SB_CONF}.tmp"; then
-    red "写入日志配置失败"
-    rm -f "${SB_CONF}.tmp" "$bak"
-    pause
-    return 1
-  fi
-  mv "${SB_CONF}.tmp" "$SB_CONF"
-
-  if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check_fg.log 2>&1; then
-    red "配置校验失败，无法前台运行"
-    cp -f "$bak" "$SB_CONF"
-    rm -f "$bak"
-    tail -n 80 /tmp/sb_check_fg.log 2>/dev/null || true
-    pause
-    return 1
-  fi
-
-  yellow "即将停止 tuic-box 后台服务并前台输出日志..."
-  svc stop tuic-box || true
-  pkill -f "^${SB_BIN} run -c ${SB_CONF}$" >/dev/null 2>&1 || true
-  pkill -x sing-box >/dev/null 2>&1 || true
-  sleep 1
-
-  green "前台日志已启动（Ctrl+C 退出）"
-  echo "日志文件: /tmp/sb-live.log"
-
-  local old_int_trap
-  old_int_trap="$(trap -p INT || true)"
-  trap ':' INT
-
-  set +e
-  "$SB_BIN" run -c "$SB_CONF" 2>&1 | tee /tmp/sb-live.log
-  set -e
-
-  if [ -n "$old_int_trap" ]; then eval "$old_int_trap"; else trap - INT; fi
-
-  cp -f "$bak" "$SB_CONF"
-  rm -f "$bak"
-
-  yellow "已退出前台日志，正在恢复后台服务..."
-  svc start tuic-box || true
-  sleep 1
-  if is_running tuic-box; then green "tuic-box 已恢复后台运行"; else red "tuic-box 恢复失败，请手动检查"; fi
-  pause
-}
-foreground_xray_log(){
-  [ -x "$XRAY_BIN" ] || { red "xray 未安装"; pause; return 1; }
-  [ -f "$XRAY_CONF" ] || { red "缺少配置: $XRAY_CONF"; pause; return 1; }
-
-  local bak="${XRAY_CONF}.bak.fg.$(date +%s)"
-  cp -a "$XRAY_CONF" "$bak"
-
-  if ! jq '.log=(.log//{})|.log.access=""|.log.error=""|.log.loglevel="debug"|.log.dnsLog=true' "$XRAY_CONF" > "${XRAY_CONF}.tmp"; then
-    red "写入 Xray 日志配置失败"
-    rm -f "${XRAY_CONF}.tmp" "$bak"
-    pause
-    return 1
-  fi
-  mv "${XRAY_CONF}.tmp" "$XRAY_CONF"
-
-  if ! "$XRAY_BIN" run -test -c "$XRAY_CONF" >/tmp/xray_check_fg.log 2>&1; then
-    red "Xray 配置校验失败，无法前台运行"
-    cp -f "$bak" "$XRAY_CONF"
-    rm -f "$bak"
-    tail -n 80 /tmp/xray_check_fg.log 2>/dev/null || true
-    pause
-    return 1
-  fi
-
-  yellow "即将停止 xray 后台服务并前台输出日志..."
-  svc stop xray || true
-  pkill -f "^${XRAY_BIN} run -c ${XRAY_CONF}$" >/dev/null 2>&1 || true
-  pkill -x xray >/dev/null 2>&1 || true
-  sleep 1
-
-  green "前台日志已启动（Ctrl+C 退出）"
-  echo "日志文件: /tmp/xray-live.log"
-
-  local old_int_trap
-  old_int_trap="$(trap -p INT || true)"
-  trap ':' INT
-
-  set +e
-  "$XRAY_BIN" run -c "$XRAY_CONF" 2>&1 | tee /tmp/xray-live.log
-  set -e
-
-  if [ -n "$old_int_trap" ]; then eval "$old_int_trap"; else trap - INT; fi
-
-  cp -f "$bak" "$XRAY_CONF"
-  rm -f "$bak"
-
-  yellow "已退出前台日志，正在恢复后台服务..."
-  svc start xray || true
-  sleep 1
-  if is_running xray; then green "xray 已恢复后台运行"; else red "xray 恢复失败，请手动检查"; fi
-  pause
-}
-
-# ========== Restart Cron ==========
-setup_cron_env(){
-  command -v crontab >/dev/null 2>&1 && return
-  if command -v apt-get >/dev/null 2>&1; then pkg_install cron; svc enable cron; svc start cron
-  elif command -v apk >/dev/null 2>&1; then pkg_install dcron; rc-service dcron start >/dev/null 2>&1 || true; rc-update add dcron default >/dev/null 2>&1 || true
-  else pkg_install cronie; svc enable crond; svc start crond; fi
-}
-manage_restart_hours(){
-  cls
-  green "当前间隔: ${RESTART_HOURS}小时 (0=关闭)"
-  prompt "输入间隔小时: " h
-  [[ "$h" =~ ^[0-9]+$ ]] || { red "输入无效"; return; }
-  RESTART_HOURS="$h"
-  echo "$RESTART_HOURS" > "$RESTART_CONF"
-
-  if [ "$RESTART_HOURS" -eq 0 ]; then
-    command -v crontab >/dev/null 2>&1 && (crontab -l 2>/dev/null | sed '/#svc-restart-all/d') | crontab -
-    green "已关闭"
-    return
-  fi
-
-  setup_cron_env
-  command -v crontab >/dev/null 2>&1 || { red "crontab不可用"; return; }
-
-  local cmd exp
-  if is_alpine; then
-    cmd='[ -f /etc/init.d/xray ] && rc-service xray restart; [ -f /etc/init.d/tuic-box ] && rc-service tuic-box restart; [ -f /etc/init.d/tunnel-argo ] && rc-service tunnel-argo restart'
-  else
-    cmd='systemctl list-unit-files | grep -q "^xray.service" && systemctl restart xray; systemctl list-unit-files | grep -q "^tuic-box.service" && systemctl restart tuic-box; systemctl list-unit-files | grep -q "^tunnel-argo.service" && systemctl restart tunnel-argo'
-  fi
-  exp="0 */${RESTART_HOURS} * * *"
-  (crontab -l 2>/dev/null | sed '/#svc-restart-all/d'; echo "${exp} ${cmd} >/dev/null 2>&1 #svc-restart-all") | crontab -
-  green "已设置每${RESTART_HOURS}小时重启（xray/tuic-box/argo）"
-}
-
-# ========== Swap ==========
-swap_cleanup_fstab(){ [ -f /etc/fstab ] && sed -i '/^\/swapfile[[:space:]]/d' /etc/fstab; }
-swap_disable_all(){
-  awk 'NR>1{print $1}' /proc/swaps 2>/dev/null | while read -r d; do [ -n "$d" ] && swapoff "$d" >/dev/null 2>&1 || true; done
-  [ -f /swapfile ] && rm -f /swapfile
-  swap_cleanup_fstab
-  if [ -d /sys/class/zram-control ] || [ -e /dev/zram0 ]; then
-    for z in /sys/block/zram*; do [ -d "$z" ] || continue; echo 1 > "$z/reset" 2>/dev/null || true; done
-  fi
-}
-zram_supported(){
-  [ -e /dev/zram0 ] && return 0
-  command -v modprobe >/dev/null 2>&1 && modprobe zram >/dev/null 2>&1 || true
-  [ -e /dev/zram0 ] && return 0
-  [ -w /sys/class/zram-control/hot_add ] && return 0
-  return 1
-}
-create_zram_swap(){
-  local mb="$1" zdev=""
-  if [ -e /dev/zram0 ]; then zdev="/dev/zram0"
-  elif [ -w /sys/class/zram-control/hot_add ]; then
-    local id; id="$(cat /sys/class/zram-control/hot_add 2>/dev/null || true)"; [ -n "$id" ] && zdev="/dev/zram${id}"
-  fi
-  [ -z "$zdev" ] && return 1
-  local zn="${zdev#/dev/}"
-  echo 1 > "/sys/block/${zn}/reset" 2>/dev/null || true
-  [ -w "/sys/block/${zn}/comp_algorithm" ] && echo lz4 > "/sys/block/${zn}/comp_algorithm" 2>/dev/null || true
-  echo "$((mb*1024*1024))" > "/sys/block/${zn}/disksize" 2>/dev/null || return 1
-  mkswap "$zdev" >/dev/null 2>&1 || return 1
-  swapon "$zdev" >/dev/null 2>&1 || return 1
-}
-create_swap_dd(){
-  local mb="$1"
-  dd if=/dev/zero of=/swapfile bs=1M count="$mb" status=none 2>"$SWAP_LOG" || return 1
-  chmod 600 /swapfile || return 1
-  mkswap /swapfile >/dev/null 2>&1 || return 1
-  swapon /swapfile >/dev/null 2>&1 || return 1
-  grep -q "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null || echo "/swapfile none swap sw 0 0" >> /etc/fstab
-}
-create_swap_fallocate(){
-  local mb="$1"
-  command -v fallocate >/dev/null 2>&1 || return 1
-  fallocate -l "${mb}M" /swapfile 2>"$SWAP_LOG" || return 1
-  chmod 600 /swapfile || return 1
-  mkswap -f /swapfile >/dev/null 2>&1 || return 1
-  swapon /swapfile >/dev/null 2>&1 || return 1
-  grep -q "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null || echo "/swapfile none swap sw 0 0" >> /etc/fstab
-}
-create_swap_best(){
-  local mb="${1:-256}"
-  swap_disable_all
-  if zram_supported && create_zram_swap "$mb"; then green "SWAP成功(ZRAM ${mb}MB)"; return 0; fi
-  if create_swap_dd "$mb"; then green "SWAP成功(dd ${mb}MB)"; return 0; fi
-  rm -f /swapfile
-  if create_swap_fallocate "$mb"; then green "SWAP成功(fallocate ${mb}MB)"; return 0; fi
-  red "SWAP失败"; return 1
-}
-manage_swap(){
-  while true; do
-    cls
-    local ram sw
-    ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null); [ -z "$ram" ] && ram=0
-    sw=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null); [ -z "$sw" ] && sw=0
-    echo -e "${C_WARN}=============== SWAP管理 ===============${C_RST}"
-    echo "RAM: ${ram}MB  SWAP: ${sw}MB"
-    echo "-----------------------------------------------"
-    menu_item_auto "1" "安装SWAP"
-    menu_item_auto "2" "卸载SWAP"
-    menu_item_auto "0" "返回"
-    echo "==============================================="
-    prompt "请选择: " c
-    case "$c" in
-      1) prompt "大小MB(默认256): " mb; mb=${mb:-256}; [[ "$mb" =~ ^[0-9]+$ ]] && [ "$mb" -gt 0 ] && create_swap_best "$mb" || red "输入无效"; pause ;;
-      2) swap_disable_all; green "已清理"; pause ;;
-      0) return ;;
-      *) red "无效"; pause ;;
-    esac
-  done
-}
-
-# ========== Shortcut / Uninstall ==========
-install_shortcut(){
-  mkdir -p "$WORK"
-  local mark="${WORK}/.shortcut_done" src dst="/usr/local/bin/ssgo"
-  [ -f "$mark" ] && { green "快捷方式已存在：ssgo"; return; }
-  src="$(readlink -f "$0" 2>/dev/null || true)"
-  [ -z "$src" ] && src="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
-  if [ -n "$src" ] && [ -f "$src" ]; then
-    cp -f "$src" "${WORK}/manager.sh" 2>/dev/null || true
-    cat > "$dst" <<'EOF'
-#!/usr/bin/env bash
-bash /etc/xray/manager.sh "$@"
-EOF
-    chmod +x "$dst"
-    ln -sf "$dst" /usr/bin/ssgo 2>/dev/null || true
-    touch "$mark"
-    green "快捷方式已创建：ssgo"
-  else
-    yellow "无法识别脚本源路径，稍后可手动创建"
-  fi
-}
-
-full_uninstall(){
-  svc stop tunnel-argo; svc disable tunnel-argo
-  svc stop xray; svc disable xray
-  svc stop tuic-box; svc disable tuic-box
-
-  rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
-  rm -f /etc/init.d/xray /etc/systemd/system/xray.service
-  rm -f /etc/init.d/tuic-box /etc/systemd/system/tuic-box.service
-
-  command -v systemctl >/dev/null 2>&1 && { systemctl daemon-reload >/dev/null 2>&1 || true; systemctl reset-failed >/dev/null 2>&1 || true; }
-
-  command -v crontab >/dev/null 2>&1 && (crontab -l 2>/dev/null | sed '/#svc-restart-all/d') | crontab - 2>/dev/null || true
-  swap_disable_all >/dev/null 2>&1 || true
-
-  rm -f /usr/local/bin/ssgo /usr/bin/ssgo
-  rm -rf "$WORK" "$SB" "$TLS_DIR"
-
-  green "已彻底卸载"
-}
-
-# ========== Menus ==========
+# ========== Outbound menu ==========
 manage_outbound_menu(){
   while true; do
     cls
-
     local merged_list merged_json merged_disp
     merged_list="$(merge_csv "$V6_COMPAT_SITES" "$V6_STRICT_SITES")"
     merged_json="$(csv_to_json_unique "$merged_list")"
@@ -1834,6 +756,7 @@ manage_outbound_menu(){
   done
 }
 
+# ========== Menus ==========
 xray_menu(){
   while true; do
     cls
@@ -1853,35 +776,40 @@ xray_menu(){
     echo -e "${C_OK}=============== Xray管理 ===============${C_RST}"
     echo -e "Xray: ${xs}   Argo: ${as}   HY2: ${hs}"
     echo "-----------------------------------------------"
-    menu_row2_auto "1"  "安装Argo"      "6"  "查看节点"
-    menu_row2_auto "2"  "卸载Argo"      "7"  "修改UUID"
-    menu_row2_auto "3"  "管理Socks5"    "8"  "重启Argo"
-    menu_row2_auto "4"  "管理免流"      "10" "实时日志"
-    menu_row2_auto "5"  "重启Xray"      "11" "安装HY2"
-    menu_row2_auto "12" "查看HY2节点"   "13" "卸载HY2"
-    menu_row2_auto "9"  "卸载Xray"      "0"  "返回"
+
+    # 左列：安装/配置/重启/卸载主流程
+    # 右列：日志/查看/修改（辅助）
+    menu_row2_auto "1" "安装Argo"      "8"  "实时日志"
+    menu_row2_auto "2" "安装HY2"       "9"  "查看节点"
+    menu_row2_auto "3" "配置Socks5"    "10" "修改UUID"
+    menu_row2_auto "4" "配置免流"      "0"  "返回"
+    menu_row2_auto "5" "重启Argo"      ""   ""
+    menu_row2_auto "6" "重启Xray"      ""   ""
+    menu_row2_auto "7" "卸载Argo"      ""   ""
+    menu_row2_auto "11" "卸载HY2"      ""   ""
+    menu_row2_auto "12" "卸载Xray"     ""   ""
+
     echo "==============================================="
     prompt "请选择: " c
     case "$c" in
       1) install_argo; pause ;;
-      2) uninstall_argo; pause ;;
+      2) install_hy2; pause ;;
       3) manage_socks5 ;;
       4) manage_freeflow ;;
-      5) service_exists xray && svc restart xray && green "Xray 已重启" || red "Xray未安装"; pause ;;
-      6) show_xray_nodes; pause ;;
-      7) prompt "新UUID(回车自动): " u; [ -z "$u" ] && u="$(gen_uuid)"; set_xray_uuid "$u"; pause ;;
-      8) service_exists tunnel-argo && svc restart tunnel-argo && green "Argo 已重启" || red "Argo未安装"; pause ;;
-      9)
+      5) service_exists tunnel-argo && svc restart tunnel-argo && green "Argo 已重启" || red "Argo未安装"; pause ;;
+      6) service_exists xray && svc restart xray && green "Xray 已重启" || red "Xray未安装"; pause ;;
+      7) uninstall_argo; pause ;;
+      8) foreground_xray_log ;;
+      9) show_xray_nodes; pause ;;
+      10) prompt "新UUID(回车自动): " u; [ -z "$u" ] && u="$(gen_uuid)"; set_xray_uuid "$u"; pause ;;
+      11) uninstall_hy2; pause ;;
+      12)
         svc stop tunnel-argo; svc disable tunnel-argo
         rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service "${WORK}/argo_start.sh" "${WORK}/argo" "$ARGO_DOMAIN" "$ARGO_YML" "$ARGO_JSON"
         svc stop xray; svc disable xray
         rm -f /etc/init.d/xray /etc/systemd/system/xray.service "$XRAY_BIN" "$XRAY_CONF" "$FREEFLOW_CONF" "$HY2_STATE"
         command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
         green "Xray已卸载"; pause ;;
-      10) foreground_xray_log ;;
-      11) install_hy2; pause ;;
-      12) show_hy2_node; pause ;;
-      13) uninstall_hy2; pause ;;
       0) return ;;
       *) red "无效"; pause ;;
     esac
@@ -1917,6 +845,58 @@ sbox_menu(){
   done
 }
 
+# ========== Tuic menu helpers ==========
+show_tuic_node(){
+  cls
+  [ -f "$SB_STATE" ] || { red "Tuic未安装"; return; }
+  local port cc domain uuid
+  IFS='|' read -r port cc domain uuid < "$SB_STATE"
+  [ -z "$port" ] || [ -z "$domain" ] || [ -z "$uuid" ] && { red "Tuic状态文件不完整"; return; }
+  [ -z "$BASE_FULL" ] && BASE_FULL="Node"
+  local name link
+  name="${BASE_FULL} - Tuic"
+  link="tuic://${uuid}:${uuid}@${domain}:${port}?congestion_control=${cc:-bbr}&alpn=h3&sni=${domain}&udp_relay_mode=quic&allow_insecure=0#$(url_encode "$name")"
+  green "=============== Tuic 节点 ==============="
+  purple "$link"
+  echo "=========================================="
+}
+
+# ========== Restart/SWAP/Uninstall ==========
+manage_restart_hours(){
+  cls
+  green "当前间隔: ${RESTART_HOURS}小时 (0=关闭)"
+  prompt "输入间隔小时: " h
+  [[ "$h" =~ ^[0-9]+$ ]] || { red "输入无效"; return; }
+  RESTART_HOURS="$h"
+  echo "$RESTART_HOURS" > "$RESTART_CONF"
+
+  if [ "$RESTART_HOURS" -eq 0 ]; then
+    command -v crontab >/dev/null 2>&1 && (crontab -l 2>/dev/null | sed '/#svc-restart-all/d') | crontab -
+    green "已关闭"
+    return
+  fi
+
+  setup_cron_env
+  command -v crontab >/dev/null 2>&1 || { red "crontab不可用"; return; }
+
+  local cmd exp
+  if is_alpine; then
+    cmd='[ -f /etc/init.d/xray ] && rc-service xray restart; [ -f /etc/init.d/tuic-box ] && rc-service tuic-box restart; [ -f /etc/init.d/tunnel-argo ] && rc-service tunnel-argo restart'
+  else
+    cmd='systemctl list-unit-files | grep -q "^xray.service" && systemctl restart xray; systemctl list-unit-files | grep -q "^tuic-box.service" && systemctl restart tuic-box; systemctl list-unit-files | grep -q "^tunnel-argo.service" && systemctl restart tunnel-argo'
+  fi
+  exp="0 */${RESTART_HOURS} * * *"
+  (crontab -l 2>/dev/null | sed '/#svc-restart-all/d'; echo "${exp} ${cmd} >/dev/null 2>&1 #svc-restart-all") | crontab -
+  green "已设置每${RESTART_HOURS}小时重启（xray/tuic-box/argo）"
+}
+setup_cron_env(){
+  command -v crontab >/dev/null 2>&1 && return
+  if command -v apt-get >/dev/null 2>&1; then pkg_install cron; svc enable cron; svc start cron
+  elif command -v apk >/dev/null 2>&1; then pkg_install dcron; rc-service dcron start >/dev/null 2>&1 || true; rc-update add dcron default >/dev/null 2>&1 || true
+  else pkg_install cronie; svc enable crond; svc start crond; fi
+}
+
+# ========== Main ==========
 sys_info(){
   local osv ker virt mem disk
   if is_alpine; then
