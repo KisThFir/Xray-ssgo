@@ -3,8 +3,7 @@ set -euo pipefail
 
 # =========================================================
 #  一体化管理脚本（Xray / Argo / HY2 / Tuic / 出站策略）
-#  - 完整可覆盖版
-#  - 菜单统一排版，关键字自动高亮
+#  - 完整可覆盖版（修复：LXC识别/窄屏排版/快捷方式拉取本地）
 # =========================================================
 
 # ========== Color ==========
@@ -31,12 +30,10 @@ url_encode(){ jq -rn --arg x "$1" '$x|@uri'; }
 [ -t 0 ] || { red "请在交互终端运行"; exit 1; }
 
 # ========== Smart Menu Render ==========
-# 基础文本色采用终端默认色（不是白色）
 C_NUM="\033[1;36m"
-C_TXT="$C_RST"
+C_TXT="\033[1;36m"
 
-# 高亮色池（排除白色）
-KW_POOL=("\033[1;32m" "\033[1;35m" "\033[1;36m" "\033[1;33m")
+KW_POOL=("\033[1;32m" "\033[1;35m" "\033[1;33m" "\033[1;34m" "\033[1;92m")
 _LAST_KW_IDX=-1
 
 pick_kw_color(){
@@ -52,38 +49,53 @@ auto_hl(){
 
   case "$s" in
     返回|退出)
-      printf "%b%s%b" "$C_BAD" "$s" "$C_RST"; return ;;
+      printf "%b%s%b" "$C_BAD" "$s" "$C_RST"
+      return
+      ;;
   esac
 
-  # 任何包含“卸载”都红色强调
+  # 任何包含“卸载”都红色强调（其余部分保持基础色）
   if [[ "$s" == *卸载* ]]; then
     left="${s%%卸载*}"
     right="${s#*卸载}"
-    printf "%b%s%b%b卸载%s%b" "$C_TXT" "$left" "$C_RST" "$C_BAD" "$right" "$C_RST"
+    printf "%b%s%b%b卸载%b%b%s%b" \
+      "$C_TXT" "$left" "$C_RST" \
+      "$C_BAD" "$C_RST" \
+      "$C_TXT" "$right" "$C_RST"
     return
   fi
 
+  # 前缀 + 关键词高亮：如 管理Xray / 安装Tuic / 修改UUID
   for pre in 管理 安装 查看 修改 重启 设置 创建 实时 配置 启用 关闭 删除 添加 定时 彻底; do
     if [[ "$s" == ${pre}* ]]; then
       kw="${s#$pre}"
-      [ -z "$kw" ] && { printf "%b%s%b" "$C_TXT" "$s" "$C_RST"; return; }
-      c="$(pick_kw_color)"
-      printf "%b%s%b%b%s%b" "$C_TXT" "$pre" "$C_RST" "$c" "$kw" "$C_RST"
+      if [ -z "$kw" ]; then
+        printf "%b%s%b" "$C_TXT" "$s" "$C_RST"
+      else
+        c="$(pick_kw_color)"
+        printf "%b%s%b%b%s%b" "$C_TXT" "$pre" "$C_RST" "$c" "$kw" "$C_RST"
+      fi
       return
     fi
   done
 
-  c="$(pick_kw_color)"
-  printf "%b%s%b" "$c" "$s" "$C_RST"
+  # 未命中前缀时：整体基础色
+  printf "%b%s%b" "$C_TXT" "$s" "$C_RST"
 }
 
 strip_ansi(){ sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g'; }
 vlen(){ printf '%s' "$1" | strip_ansi | awk '{print length}'; }
 
-# 双列菜单：根据可见字符长度对齐（不会被颜色码干扰）
+term_cols(){
+  local c
+  c="$(tput cols 2>/dev/null || stty size 2>/dev/null | awk '{print $2}' || echo 80)"
+  [ -z "$c" ] && c=80
+  echo "$c"
+}
+
 menu_row2_auto(){
   local lnum="$1" ltxt="$2" rnum="${3:-}" rtxt="${4:-}"
-  local left right target=58 llen pad i
+  local left right cols llen rlen pad i target
 
   left=$(printf "%b%2s.%b %s" "$C_NUM" "$lnum" "$C_RST" "$(auto_hl "$ltxt")")
 
@@ -94,7 +106,14 @@ menu_row2_auto(){
 
   right=$(printf "%b%2s.%b %s" "$C_NUM" "$rnum" "$C_RST" "$(auto_hl "$rtxt")")
 
+  cols="$(tput cols 2>/dev/null || stty size 2>/dev/null | awk '{print $2}' || echo 80)"
+  [ -z "$cols" ] && cols=80
+
   llen=$(vlen "$left")
+  rlen=$(vlen "$right")
+
+  # 目标是让右列靠右，但始终双列；太窄时最小留2空格
+  target=$((cols - rlen))
   pad=$((target - llen))
   [ "$pad" -lt 2 ] && pad=2
 
@@ -138,13 +157,16 @@ SS_FIXED_IP="104.18.40.49"
 
 SB_FIXED_VER="v1.13.11"
 
+# 快捷方式拉取源（可通过环境变量覆盖）
+SCRIPT_URL_DEFAULT="https://raw.githubusercontent.com/KisThFir/Xray-ssgo/refs/heads/main/Xray_ssgo.sh"
+SCRIPT_URL="${SCRIPT_URL:-$SCRIPT_URL_DEFAULT}"
+
 FREEFLOW_MODE="none"
 FF_PATH="/"
 RESTART_HOURS=0
 XHTTP_MODE="auto"
 XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPaddingPlacement":"queryInHeader","xPaddingHeader":"y2k","xPaddingKey":"_y2k"}'
 
-# YouTube 模式：0关闭 1兼容 2严格
 YOUTUBE_MODE=0
 V6_COMPAT_SITES=""
 V6_STRICT_SITES=""
@@ -1566,23 +1588,36 @@ manage_swap(){
 # ========== Shortcut / Uninstall ==========
 install_shortcut(){
   mkdir -p "$WORK"
-  local mark="${WORK}/.shortcut_done" src dst="/usr/local/bin/ssgo"
-  [ -f "$mark" ] && { green "快捷方式已存在：ssgo"; return; }
-  src="$(readlink -f "$0" 2>/dev/null || true)"
-  [ -z "$src" ] && src="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
-  if [ -n "$src" ] && [ -f "$src" ]; then
-    cp -f "$src" "${WORK}/manager.sh" 2>/dev/null || true
-    cat > "$dst" <<'EOF'
+  local mark="${WORK}/.shortcut_done"
+  local local_script="${WORK}/manager.sh"
+  local dst="/usr/local/bin/ssgo"
+
+  yellow "正在拉取脚本到本地: ${local_script}"
+  smart_download "$local_script" "$SCRIPT_URL" 200000 || {
+    red "拉取失败: $SCRIPT_URL"
+    return 1
+  }
+
+  # 权限修复
+  chmod 755 "$WORK" 2>/dev/null || true
+  chmod 700 "$local_script" 2>/dev/null || chmod +x "$local_script" || true
+  chown root:root "$local_script" 2>/dev/null || true
+
+  mkdir -p /usr/local/bin /usr/bin
+  cat > "$dst" <<'EOF'
 #!/usr/bin/env bash
-bash /etc/xray/manager.sh "$@"
+exec bash /etc/xray/manager.sh "$@"
 EOF
-    chmod +x "$dst"
-    ln -sf "$dst" /usr/bin/ssgo 2>/dev/null || true
-    touch "$mark"
-    green "快捷方式已创建：ssgo"
-  else
-    yellow "无法识别脚本源路径，稍后可手动创建"
-  fi
+  chmod 755 "$dst"
+  chown root:root "$dst" 2>/dev/null || true
+
+  ln -sf "$dst" /usr/bin/ssgo
+  chmod 755 /usr/bin/ssgo 2>/dev/null || true
+  chown -h root:root /usr/bin/ssgo 2>/dev/null || true
+
+  touch "$mark"
+  chmod 600 "$mark" 2>/dev/null || true
+  green "快捷方式已创建：ssgo -> /etc/xray/manager.sh"
 }
 
 full_uninstall(){
@@ -1690,7 +1725,7 @@ manage_outbound_menu(){
   done
 }
 
-# ========== Xray menu (按你逻辑排版) ==========
+# ========== Xray menu ==========
 xray_menu(){
   while true; do
     cls
@@ -1703,7 +1738,6 @@ xray_menu(){
     echo -e "Xray: ${xs}   Argo: ${as}   HY2: ${hs}"
     echo "-----------------------------------------------"
 
-    # 左列完整流程；右列辅助项
     menu_row2_auto "1"  "安装Argo"      "8"  "实时日志"
     menu_row2_auto "2"  "安装HY2"       "9"  "查看节点"
     menu_row2_auto "3"  "配置Socks5"    "10" "修改UUID"
@@ -1762,6 +1796,39 @@ sbox_menu(){
 }
 
 # ========== System info ==========
+detect_virt_name(){
+  local v=""
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    v="$(systemd-detect-virt 2>/dev/null || true)"
+    [ -n "$v" ] && [ "$v" != "none" ] && { echo "${v^^}"; return; }
+  fi
+
+  if [ -f /run/systemd/container ]; then
+    v="$(cat /run/systemd/container 2>/dev/null || true)"
+    [ -n "$v" ] && { echo "${v^^}"; return; }
+  fi
+
+  if tr '\0' '\n' </proc/1/environ 2>/dev/null | grep -qi '^container=lxc$'; then
+    echo "LXC"; return
+  fi
+  if tr '\0' '\n' </proc/1/environ 2>/dev/null | grep -qi '^container=docker$'; then
+    echo "DOCKER"; return
+  fi
+
+  if grep -qaE '(lxc|docker|containerd|kubepods|podman)' /proc/1/cgroup 2>/dev/null; then
+    if grep -qa 'lxc' /proc/1/cgroup 2>/dev/null; then echo "LXC"; return; fi
+    if grep -qa 'docker' /proc/1/cgroup 2>/dev/null; then echo "DOCKER"; return; fi
+    if grep -qa 'containerd' /proc/1/cgroup 2>/dev/null; then echo "CONTAINERD"; return; fi
+    if grep -qa 'podman' /proc/1/cgroup 2>/dev/null; then echo "PODMAN"; return; fi
+    echo "CONTAINER"; return
+  fi
+
+  # LXC 常见标记
+  [ -f /proc/1/ns/mnt ] && [ -d /dev/lxd ] && { echo "LXC"; return; }
+
+  echo "UNKNOWN"
+}
+
 sys_info(){
   local osv ker virt mem
   if is_alpine; then
@@ -1778,11 +1845,10 @@ sys_info(){
   fi
 
   ker="$(cut -d- -f1 < /proc/sys/kernel/osrelease 2>/dev/null || uname -r)"
-  if command -v systemd-detect-virt >/dev/null 2>&1; then virt="$(systemd-detect-virt 2>/dev/null || echo unknown)"; else virt="unknown"; fi
+  virt="$(detect_virt_name)"
   mem="$(awk '/MemTotal/{m=$2/1024; if(m>1024) printf"%.1fG",m/1024; else printf"%.0fM",m}' /proc/meminfo 2>/dev/null)"
 
-  # 末尾无多余 |
-  printf "%s  |  %s  |  %s  |  %s" "$osv" "$ker" "${virt^^}" "$mem"
+  printf "%s  |  %s  |  %s  |  %s" "$osv" "$ker" "$virt" "$mem"
 }
 mem_used_disp(){
   awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{u=t-a; if(t>1024*1024) printf "%.1fG/%.1fG",u/1024/1024,t/1024/1024; else printf "%.0fM/%.0fM",u/1024,t/1024}' /proc/meminfo 2>/dev/null
