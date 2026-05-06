@@ -1,41 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================
-# Color & Theme
-# =========================
 C_RST="\033[0m"
-
-# 全局基础色（与系统信息一致）
 C_BASE="\033[1;36m"
-
-# semantic colors
-C_TITLE="\033[1;36m"
+C_TITLE="$C_BASE"
 C_INFO="$C_BASE"
 C_OK="\033[1;32m"
 C_WARN="\033[1;33m"
 C_ERR="\033[1;91m"
 C_MUTED="\033[0;37m"
 
-C_INSTALL="\033[1;32m"   # install/add
-C_MODIFY="\033[1;33m"    # modify
-C_VIEW="\033[1;36m"      # view/query
-C_MANAGE="$C_BASE"       # base/manage
-C_RESTART="\033[1;34m"   # restart/apply
-C_BAD="\033[1;91m"       # delete/danger / 退出返回统一红色
+C_BAD="\033[1;91m"
+C_PROMPT="\033[1;91m"
 
-# module colors(重点关键词尽量区分)
-C_XRAY="\033[1;96m"       # 亮青
-C_SBOX="\033[1;95m"       # 亮紫
-C_OUTBOUND="\033[1;93m"   # 亮黄
-C_RESTART_KEY="\033[1;94m" # 亮蓝
-C_SWAP_KEY="\033[1;92m"    # 亮绿
-C_SHORTCUT_KEY="\033[1;35m" # 紫红
+C_XRAY_K="\033[1;96m"
+C_SBOX_K="\033[1;95m"
+C_OUTBOUND_K="\033[1;93m"
+C_RESTART_K="\033[1;94m"
+C_SWAP_K="\033[1;92m"
+C_SHORTCUT_K="\033[1;35m"
+
 C_ARGO="\033[1;35m"
-C_TUIC="\033[1;95m"
 C_HY2="\033[1;36m"
-C_FREEFLOW="\033[1;34m"
-C_SOCKS5="\033[1;37m"
 
 red(){ printf '\033[1;91m%s\033[0m\n' "$1"; }
 green(){ printf '\033[1;32m%s\033[0m\n' "$1"; }
@@ -43,110 +29,26 @@ yellow(){ printf '\033[1;33m%s\033[0m\n' "$1"; }
 purple(){ printf '\033[1;35m%s\033[0m\n' "$1"; }
 
 clear_buffer(){ while read -r -t 0.08 -n 10000 _d </dev/tty 2>/dev/null; do :; done; }
-prompt(){ clear_buffer; printf '\033[1;91m%s\033[0m' "$1" >&2; read -r "$2" </dev/tty; }
-pause(){ printf '\n\033[1;91m按回车继续...\033[0m\n' >&2; clear_buffer; read -r _d </dev/tty; }
+prompt(){ clear_buffer; printf '%b%s%b' "$C_PROMPT" "$1" "$C_RST" >&2; read -r "$2" </dev/tty; }
+pause(){ printf '\n%b按回车继续...%b\n' "$C_PROMPT" "$C_RST" >&2; clear_buffer; read -r _d </dev/tty; }
 cls(){ clear; printf '\033[3J\033[2J\033[H'; }
 url_encode(){ jq -rn --arg x "$1" '$x|@uri'; }
 
-# =========================
-# UI helpers
-# =========================
 term_cols(){ tput cols 2>/dev/null || echo 80; }
 is_narrow(){ [ "$(term_cols)" -lt 86 ]; }
 
 hr(){
-  local n="${1:-66}" c="${2:-$C_TITLE}"
+  local n="${1:-64}" c="${2:-$C_TITLE}"
   printf "%b" "$c"
   printf '%*s' "$n" '' | tr ' ' '─'
   printf "%b\n" "$C_RST"
 }
-module_head(){
-  local t="$1" c="${2:-$C_TITLE}"
-  printf "%b" "$c"
-  printf "【%s】\n" "$t"
-  printf "%b" "$C_RST"
-}
 title(){
   local t="$1" c="${2:-$C_TITLE}"
   cls
-  printf "%b" "$c"
-  echo "================ ${t} ================"
-  printf "%b\n" "$C_RST"
+  printf "%b================ %s ================%b\n" "$c" "$t" "$C_RST"
 }
 
-# 旧单列菜单项
-menu_item(){
-  # $1 num  $2 type(i/m/v/r/d/n)  $3 text
-  local num="$1" typ="$2" txt="$3" col="$C_MANAGE"
-  case "$typ" in
-    i) col="$C_INSTALL" ;;
-    m) col="$C_MODIFY" ;;
-    v) col="$C_VIEW" ;;
-    r) col="$C_RESTART" ;;
-    d) col="$C_BAD" ;;
-    n) col="$C_MANAGE" ;;
-  esac
-  printf "%b%2s.%b %s\n" "$col" "$num" "$C_RST" "$txt"
-}
-
-# 两列菜单渲染
-# 使用示例:
-# render_two_col_menu \
-# "1|n|管理Xray|2|n|管理Sbox" \
-# "3|n|管理出站|4|n|定时重启"
-render_two_col_menu(){
-  local colw left right
-  colw=$(( ($(term_cols)-6)/2 ))
-  [ "$colw" -lt 28 ] && colw=28
-
-  local row
-  for row in "$@"; do
-    IFS='|' read -r ln lt ltxt rn rt rtxt <<< "$row"
-
-    local lcolor="$C_MANAGE" rcolor="$C_MANAGE"
-    case "$lt" in
-      i) lcolor="$C_INSTALL" ;;
-      m) lcolor="$C_MODIFY" ;;
-      v) lcolor="$C_VIEW" ;;
-      r) lcolor="$C_RESTART" ;;
-      d) lcolor="$C_BAD" ;;
-      n) lcolor="$C_MANAGE" ;;
-      xray) lcolor="$C_XRAY" ;;
-      sbox) lcolor="$C_SBOX" ;;
-      outbound) lcolor="$C_OUTBOUND" ;;
-      restartk) lcolor="$C_RESTART_KEY" ;;
-      swapk) lcolor="$C_SWAP_KEY" ;;
-      shortcutk) lcolor="$C_SHORTCUT_KEY" ;;
-    esac
-    case "$rt" in
-      i) rcolor="$C_INSTALL" ;;
-      m) rcolor="$C_MODIFY" ;;
-      v) rcolor="$C_VIEW" ;;
-      r) rcolor="$C_RESTART" ;;
-      d) rcolor="$C_BAD" ;;
-      n) rcolor="$C_MANAGE" ;;
-      xray) rcolor="$C_XRAY" ;;
-      sbox) rcolor="$C_SBOX" ;;
-      outbound) rcolor="$C_OUTBOUND" ;;
-      restartk) rcolor="$C_RESTART_KEY" ;;
-      swapk) rcolor="$C_SWAP_KEY" ;;
-      shortcutk) rcolor="$C_SHORTCUT_KEY" ;;
-    esac
-
-    local lstr rstr
-    lstr=$(printf "%b%2s.%b %s" "$lcolor" "$ln" "$C_RST" "$ltxt")
-    if [ -n "${rn:-}" ]; then
-      rstr=$(printf "%b%2s.%b %s" "$rcolor" "$rn" "$C_RST" "$rtxt")
-    else
-      rstr=""
-    fi
-
-    # shellcheck disable=SC2059
-    printf "%-${colw}s  %s\n" "$lstr" "$rstr"
-  done
-}
-
-# shrink long line for phone terminal
 clip_text(){
   local s="$1" max="${2:-72}"
   local len=${#s}
@@ -157,27 +59,61 @@ clip_text(){
   fi
 }
 
-paint_keyword(){
-  # 在一句文本中给重点词上色，非重点保持基础色
-  # 用法: paint_keyword "管理Xray"
-  local t="$1"
-  t="${t//Xray/${C_XRAY}Xray${C_RST}${C_BASE}}"
-  t="${t//Sbox/${C_SBOX}Sbox${C_RST}${C_BASE}}"
-  t="${t//出站/${C_OUTBOUND}出站${C_RST}${C_BASE}}"
-  t="${t//重启/${C_RESTART_KEY}重启${C_RST}${C_BASE}}"
-  t="${t//Swap/${C_SWAP_KEY}Swap${C_RST}${C_BASE}}"
-  t="${t//快捷/${C_SHORTCUT_KEY}快捷${C_RST}${C_BASE}}"
-  t="${t//返回/${C_BAD}返回${C_RST}${C_BASE}}"
-  t="${t//退出/${C_BAD}退出${C_RST}${C_BASE}}"
-  printf "%b%s%b" "$C_BASE" "$t" "$C_RST"
+paint_text(){
+  local s="$1"
+  s="${s//Xray/${C_XRAY_K}Xray${C_BASE}}"
+  s="${s//Sbox/${C_SBOX_K}Sbox${C_BASE}}"
+  s="${s//出站/${C_OUTBOUND_K}出站${C_BASE}}"
+  s="${s//重启/${C_RESTART_K}重启${C_BASE}}"
+  s="${s//Swap/${C_SWAP_K}Swap${C_BASE}}"
+  s="${s//快捷/${C_SHORTCUT_K}快捷${C_BASE}}"
+  s="${s//返回/${C_BAD}返回${C_BASE}}"
+  s="${s//退出/${C_BAD}退出${C_BASE}}"
+  printf "%b%s%b" "$C_BASE" "$s" "$C_RST"
+}
+
+menu_num_color(){
+  local num="$1"
+  case "$num" in
+    0|9) printf "%b" "$C_BAD" ;;
+    1) printf "%b" "$C_XRAY_K" ;;
+    2) printf "%b" "$C_SBOX_K" ;;
+    3) printf "%b" "$C_OUTBOUND_K" ;;
+    4) printf "%b" "$C_RESTART_K" ;;
+    5) printf "%b" "$C_SWAP_K" ;;
+    6) printf "%b" "$C_SHORTCUT_K" ;;
+    *) printf "%b" "$C_BASE" ;;
+  esac
+}
+
+render_two_col_menu(){
+  local colw row
+  colw=$(( ($(term_cols)-6)/2 ))
+  [ "$colw" -lt 26 ] && colw=26
+
+  for row in "$@"; do
+    IFS='|' read -r lnum ltxt rnum rtxt <<< "$row"
+
+    local lnumc rnumc llabel rlabel lcell rcell
+    lnumc="$(menu_num_color "$lnum")"
+    llabel="$(paint_text "$ltxt")"
+    lcell="$(printf '%b%2s.%b %s' "$lnumc" "$lnum" "$C_RST" "$llabel")"
+
+    if [ -n "${rnum:-}" ]; then
+      rnumc="$(menu_num_color "$rnum")"
+      rlabel="$(paint_text "$rtxt")"
+      rcell="$(printf '%b%2s.%b %s' "$rnumc" "$rnum" "$C_RST" "$rlabel")"
+    else
+      rcell=""
+    fi
+
+    printf "%-${colw}s  %s\n" "$lcell" "$rcell"
+  done
 }
 
 [ "$EUID" -ne 0 ] && red "请用root运行" && exit 1
 [ -t 0 ] || { red "请在交互终端运行"; exit 1; }
 
-# =========================
-# Paths
-# =========================
 WORK="/etc/xray"
 XRAY_BIN="${WORK}/xray"
 XRAY_CONF="${WORK}/config.json"
@@ -213,7 +149,6 @@ RESTART_HOURS=0
 XHTTP_MODE="auto"
 XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPaddingPlacement":"queryInHeader","xPaddingHeader":"y2k","xPaddingKey":"_y2k"}'
 
-# YouTube模式：0关闭 1兼容 2严格
 YOUTUBE_MODE=0
 V6_COMPAT_SITES=""
 V6_STRICT_SITES=""
@@ -223,13 +158,9 @@ IP_CACHE_MTIME=0
 WAN4="" WAN6=""
 COUNTRY4="" COUNTRY6=""
 ISP4="" ISP6=""
-EMOJI4="" EMOJI6=""
 BASE_REGION="Node"
 BASE_FULL="Node"
 
-# =========================
-# Service
-# =========================
 is_alpine(){ [ -f /etc/alpine-release ]; }
 
 service_exists(){
@@ -264,9 +195,6 @@ is_running(){
   fi
 }
 
-# =========================
-# Package
-# =========================
 need_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
 pkg_install(){
@@ -302,9 +230,6 @@ ensure_deps(){
   return 0
 }
 
-# =========================
-# Helpers
-# =========================
 detect_xray_arch(){
   case "$(uname -m)" in
     x86_64|amd64) echo "64" ;;
@@ -381,9 +306,6 @@ update_xray(){
   mv "${XRAY_CONF}.tmp" "$XRAY_CONF"
 }
 
-# =========================
-# State
-# =========================
 load_state(){
   if [ -f "$FREEFLOW_CONF" ]; then
     read -r FREEFLOW_MODE < "$FREEFLOW_CONF" || true
@@ -411,22 +333,6 @@ save_outbound(){
   } > "$OUTBOUND_CONF"
 }
 
-# =========================
-# IP / ISP
-# =========================
-country_flag(){
-  local cc="${1^^}"
-  [[ "$cc" =~ ^[A-Z]{2}$ ]] || { echo ""; return; }
-
-  local o1 o2 h1 h2
-  o1=$(printf '%d' "'${cc:0:1}")
-  o2=$(printf '%d' "'${cc:1:1}")
-
-  h1=$(printf '%08X' $((0x1F1E6 + o1 - 65)))
-  h2=$(printf '%08X' $((0x1F1E6 + o2 - 65)))
-
-  printf "\\U${h1}\\U${h2}" 2>/dev/null || echo ""
-}
 normalize_country_code(){
   local c="$(echo "${1:-}" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   local cu="$(echo "$c" | tr '[:lower:]' '[:upper:]')"
@@ -469,31 +375,25 @@ COUNTRY4=$(printf '%q' "$COUNTRY4")
 COUNTRY6=$(printf '%q' "$COUNTRY6")
 ISP4=$(printf '%q' "$ISP4")
 ISP6=$(printf '%q' "$ISP6")
-EMOJI4=$(printf '%q' "$EMOJI4")
-EMOJI6=$(printf '%q' "$EMOJI6")
 BASE_REGION=$(printf '%q' "$BASE_REGION")
 BASE_FULL=$(printf '%q' "$BASE_FULL")
 EOF
 }
 load_ip_cache(){
   [ -f "$IPCACHE" ] || return 1
-  # shellcheck disable=SC1090
   . "$IPCACHE" 2>/dev/null || return 1
   [ -n "${WAN4}${WAN6}" ] || return 1
   IP_CHECKED=1
   return 0
 }
 apply_base_name(){
-  local cc isp emo
+  local cc isp
   if [ -n "$COUNTRY4" ] || [ -n "$ISP4" ]; then
-    cc="${COUNTRY4^^}"; isp="$ISP4"; emo="$EMOJI4"
+    cc="${COUNTRY4^^}"; isp="$ISP4"
   else
-    cc="${COUNTRY6^^}"; isp="$ISP6"; emo="$EMOJI6"
+    cc="${COUNTRY6^^}"; isp="$ISP6"
   fi
-  if [ -z "$emo" ]; then emo="$(country_flag "$cc" 2>/dev/null || true)"; fi
-  if [ -n "$emo" ] && [ -n "$cc" ]; then
-    BASE_REGION="${emo} ${cc}"
-  elif [ -n "$cc" ]; then
+  if [ -n "$cc" ]; then
     BASE_REGION="${cc}"
   else
     BASE_REGION="Node"
@@ -532,13 +432,9 @@ fill_by_ipinfo_ip(){
     cc="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/country" 2>/dev/null || true)"
     cc="$(normalize_country_code "$cc")"
     if [ "$fam" = "4" ]; then
-      WAN4="$ip"; COUNTRY4="$cc"
-      EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
-      ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
+      WAN4="$ip"; COUNTRY4="$cc"; ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
     else
-      WAN6="$ip"; COUNTRY6="$cc"
-      EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
-      ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
+      WAN6="$ip"; COUNTRY6="$cc"; ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
     fi
     return 0
   fi
@@ -549,12 +445,10 @@ fill_by_ipinfo_ip(){
   if [ "$fam" = "4" ]; then
     WAN4="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
     COUNTRY4="$cc"
-    EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
     ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
   else
     WAN6="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
     COUNTRY6="$cc"
-    EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
     ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
   fi
 }
@@ -564,26 +458,19 @@ parse_cf_json(){
   [ -z "$j" ] && return 1
   echo "$j" | jq -e '.ip' >/dev/null 2>&1 || return 1
 
-  local ip cc emo asn isp
+  local ip cc asn isp
   ip="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
   cc="$(echo "$j" | jq -r '.country // empty' 2>/dev/null || true)"
   cc="$(normalize_country_code "$cc")"
-  emo="$(echo "$j" | jq -r '.emoji // empty' 2>/dev/null || true)"
   asn="$(echo "$j" | jq -r '.asn // empty' 2>/dev/null || true)"
   isp="$(echo "$j" | jq -r '.isp // empty' 2>/dev/null || true)"
   [ -z "$ip" ] && return 1
 
-  if ! printf '%s' "$emo" | grep -q '[🇦-🇿]'; then
-    emo=""
-  fi
-
   if [ "$fam" = "4" ]; then
     WAN4="$ip"; COUNTRY4="$cc"
-    EMOJI4="$emo"; [ -z "$EMOJI4" ] && EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
     ISP4="$(clean_isp "${asn:+AS${asn} }${isp}")"; [ -z "$ISP4" ] && ISP4="$(clean_isp "$isp")"; [ -z "$ISP4" ] && ISP4="unknown"
   else
     WAN6="$ip"; COUNTRY6="$cc"
-    EMOJI6="$emo"; [ -z "$EMOJI6" ] && EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
     ISP6="$(clean_isp "${asn:+AS${asn} }${isp}")"; [ -z "$ISP6" ] && ISP6="$(clean_isp "$isp")"; [ -z "$ISP6" ] && ISP6="unknown"
   fi
   return 0
@@ -602,7 +489,6 @@ check_ip(){
   WAN4=""; WAN6=""
   COUNTRY4=""; COUNTRY6=""
   ISP4=""; ISP6=""
-  EMOJI4=""; EMOJI6=""
 
   local IF4="" L4=""
   IF4="$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
@@ -656,9 +542,6 @@ check_ip(){
   return 0
 }
 
-# =========================
-# Domain helpers
-# =========================
 normalize_domain_item(){
   local s="$1"
   s="${s#http://}"; s="${s#https://}"
@@ -703,9 +586,6 @@ yt_mode_str(){
   esac
 }
 
-# =========================
-# Xray
-# =========================
 init_xray_conf(){
   mkdir -p "$WORK"
   [ -f "$XRAY_CONF" ] && return
@@ -807,9 +687,6 @@ EOF
   green "Xray安装完成"
 }
 
-# =========================
-# Outbound apply
-# =========================
 apply_policy_xray(){
   [ -f "$XRAY_CONF" ] || return 0
   ensure_dns_rule
@@ -898,9 +775,6 @@ apply_policy_all(){
   green "出站规则已应用(Xray+Sbox)"
 }
 
-# =========================
-# Argo
-# =========================
 install_argo(){
   install_xray || return 1
   ensure_dns_rule || return 1
@@ -1011,12 +885,6 @@ uninstall_argo(){
   green "Argo已卸载"
 }
 
-# =========================
-# HY2 on Xray
-# =========================
-hy2_exists(){
-  jq -e '.inbounds[]? | select(.protocol=="hysteria2" and .tag=="hy2-in")' "$XRAY_CONF" >/dev/null 2>&1
-}
 write_hy2_state(){
   local port="$1" domain="$2" pass="$3" up="$4" down="$5" obfs="$6"
   mkdir -p "$WORK"
@@ -1028,27 +896,6 @@ write_hy2_state(){
     echo "DOWN=$down"
     echo "OBFS=$obfs"
   } > "$HY2_STATE"
-}
-show_hy2_node(){
-  cls
-  if [ ! -f "$HY2_STATE" ]; then
-    red "HY2未安装"
-    return
-  fi
-  # shellcheck disable=SC1090
-  . "$HY2_STATE" 2>/dev/null || { red "HY2状态文件损坏"; return; }
-  [ -z "${PORT:-}" ] && { red "HY2状态不完整"; return; }
-  [ -z "${DOMAIN:-}" ] && { red "HY2状态不完整"; return; }
-  [ -z "${PASS:-}" ] && { red "HY2状态不完整"; return; }
-
-  local name link
-  [ -z "$BASE_FULL" ] && BASE_FULL="Node"
-  name="${BASE_FULL}-HY2"
-  link="hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}#$(url_encode "$name")"
-
-  green "===============HY2节点==============="
-  purple "$link"
-  echo "====================================="
 }
 install_hy2(){
   install_xray || return 1
@@ -1140,9 +987,6 @@ uninstall_hy2(){
   green "HY2已卸载"
 }
 
-# =========================
-# Nodes
-# =========================
 show_xray_nodes(){
   cls
   [ "$IP_CHECKED" = "1" ] || load_ip_cache >/dev/null 2>&1 || true
@@ -1207,9 +1051,7 @@ show_xray_nodes(){
     done <<< "$sl"
   fi
 
-  # HY2也并入统一查看
   if [ -f "$HY2_STATE" ]; then
-    # shellcheck disable=SC1090
     . "$HY2_STATE" 2>/dev/null || true
     if [ -n "${PORT:-}" ] && [ -n "${DOMAIN:-}" ] && [ -n "${PASS:-}" ] && [ -n "${OBFS:-}" ]; then
       local hn
@@ -1223,15 +1065,11 @@ show_xray_nodes(){
   echo "=========================================="
 }
 
-# =========================
-# Socks5
-# =========================
 manage_socks5(){
   if [ ! -f "$XRAY_CONF" ]; then
-    title "Socks5管理" "$C_SOCKS5"
+    title "Socks5管理" "$C_BASE"
     red "未检测到Xray"
-    menu_item 1 i "立即安装Xray"
-    menu_item 0 d "返回"
+    render_two_col_menu "1|安装Xray|0|返回"
     prompt "请选择:" k
     case "$k" in
       1) install_xray || { red "安装失败"; pause; return; } ;;
@@ -1243,15 +1081,15 @@ manage_socks5(){
   ensure_dns_rule || { red "初始化失败"; pause; return; }
 
   while true; do
-    title "Socks5管理" "$C_SOCKS5"
+    title "Socks5管理" "$C_BASE"
     local list
     list="$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$XRAY_CONF" 2>/dev/null || true)"
     if [ -z "$list" ]; then
       echo -e "当前:${C_BAD}未配置${C_RST}"
     else
-      hr 66 "$C_SOCKS5"
+      hr 64 "$C_BASE"
       echo "端口      |用户名      |密码"
-      hr 66 "$C_SOCKS5"
+      hr 64 "$C_BASE"
       while read -r line; do
         [ -z "$line" ] && continue
         printf "%-10s|%-12s|%s\n" \
@@ -1260,11 +1098,11 @@ manage_socks5(){
           "$(echo "$line" | jq -r '.settings.accounts[0].pass')"
       done <<< "$list"
     fi
-    hr 66 "$C_SOCKS5"
+    hr 64 "$C_BASE"
     render_two_col_menu \
-      "1|i|安装Socks5|2|m|修改Socks5" \
-      "3|d|卸载Socks5|0|d|返回"
-    hr 66 "$C_SOCKS5"
+      "1|安装Socks5|2|修改Socks5" \
+      "3|卸载Socks5|0|返回"
+    hr 64 "$C_BASE"
     prompt "请选择:" c
     case "$c" in
       1)
@@ -1312,9 +1150,6 @@ manage_socks5(){
   done
 }
 
-# =========================
-# Freeflow
-# =========================
 apply_freeflow(){
   [ -f "$XRAY_CONF" ] || { red "xray未安装"; return 1; }
   ensure_dns_rule || return 1
@@ -1329,10 +1164,9 @@ apply_freeflow(){
 }
 manage_freeflow(){
   if [ ! -f "$XRAY_CONF" ]; then
-    title "免流管理" "$C_FREEFLOW"
+    title "免流管理" "$C_BASE"
     red "未检测到Xray"
-    menu_item 1 i "立即安装Xray"
-    menu_item 0 d "返回"
+    render_two_col_menu "1|安装Xray|0|返回"
     prompt "请选择:" k
     case "$k" in
       1) install_xray || { red "安装失败"; pause; return; } ;;
@@ -1342,30 +1176,29 @@ manage_freeflow(){
   fi
 
   while true; do
-    title "免流管理" "$C_FREEFLOW"
+    title "免流管理" "$C_BASE"
     local s="${C_BAD}未配置${C_RST}"
     if [ "$FREEFLOW_MODE" != "none" ]; then
       local m="${FREEFLOW_MODE^^}"; [ "$m" = "HTTPUPGRADE" ] && m="HTTP+"
       s="${C_INFO}${m}${C_RST} path=${FF_PATH}"
     fi
     printf "当前:%b\n" "$s"
-    hr 66 "$C_FREEFLOW"
-
+    hr 64 "$C_BASE"
     render_two_col_menu \
-      "1|m|修改免流方式|2|m|修改免流路径" \
-      "3|d|卸载免流|0|d|返回"
+      "1|修改免流方式|2|修改免流路径" \
+      "3|卸载免流|0|返回"
+    hr 64 "$C_BASE"
 
-    hr 66 "$C_FREEFLOW"
     prompt "请选择:" c
     case "$c" in
       1)
         echo
         green "请选择免流方式"
-        hr 66 "$C_FREEFLOW"
+        hr 64 "$C_BASE"
         echo "1.WS"
         echo "2.HTTPUpgrade"
         echo "3.关闭"
-        hr 66 "$C_FREEFLOW"
+        hr 64 "$C_BASE"
         prompt "请选择:" k
         case "$k" in
           1) FREEFLOW_MODE="ws" ;;
@@ -1399,9 +1232,6 @@ manage_freeflow(){
   done
 }
 
-# =========================
-# Tuic / sing-box
-# =========================
 install_sbox_core(){
   ensure_deps || return 1
   mkdir -p "$SB" "$WORK"
@@ -1547,47 +1377,25 @@ ensure_tuic_service(){
 #!/sbin/openrc-run
 name="tuic-box"
 description="Tuicbysing-box"
-
 SINGBOX_BIN="${SB_BIN}"
 SINGBOX_CFG="${SB_CONF}"
 PIDFILE="/run/\${RC_SVCNAME}.pid"
-
 command="\${SINGBOX_BIN}"
 command_args="run -c \${SINGBOX_CFG}"
 command_background="yes"
 pidfile="\${PIDFILE}"
-
-depend() {
-  need net
-  use dns logger
-  after firewall
-}
-
-start_pre() {
+depend(){ need net; use dns logger; after firewall; }
+start_pre(){
   checkpath --directory --mode 0755 /run
-  [ -x "\${SINGBOX_BIN}" ] || { eerror "binarynotfound:\${SINGBOX_BIN}"; return 1; }
-  [ -f "\${SINGBOX_CFG}" ] || { eerror "confignotfound:\${SINGBOX_CFG}"; return 1; }
-
-  ebegin "Checkingsing-boxconfig"
+  [ -x "\${SINGBOX_BIN}" ] || return 1
+  [ -f "\${SINGBOX_CFG}" ] || return 1
   "\${SINGBOX_BIN}" check -c "\${SINGBOX_CFG}" >/dev/null 2>&1
-  eend \$? "Configcheckfailed"
 }
-
-stop() {
-  ebegin "Stopping\${RC_SVCNAME}"
-  if [ -f "\${PIDFILE}" ]; then
-    start-stop-daemon --stop --pidfile "\${PIDFILE}" --retry TERM/20/KILL/5 >/dev/null 2>&1 || true
-  fi
+stop(){
+  [ -f "\${PIDFILE}" ] && start-stop-daemon --stop --pidfile "\${PIDFILE}" --retry TERM/20/KILL/5 >/dev/null 2>&1 || true
   pkill -f "^\${SINGBOX_BIN} run -c \${SINGBOX_CFG}\$" >/dev/null 2>&1 || true
   pkill -x sing-box >/dev/null 2>&1 || true
   rm -f "\${PIDFILE}"
-
-  if pgrep -f "^\${SINGBOX_BIN} run -c \${SINGBOX_CFG}\$" >/dev/null 2>&1; then
-    eend 1 "Processstillalive"
-    return 1
-  fi
-  eend 0
-  return 0
 }
 EOF
     chmod +x /etc/init.d/tuic-box
@@ -1671,9 +1479,6 @@ uninstall_tuic(){
   green "Sbox已卸载"
 }
 
-# =========================
-# Foreground logs
-# =========================
 foreground_sbox_log(){
   [ -x "$SB_BIN" ] || { red "sing-box未安装"; pause; return 1; }
   [ -f "$SB_CONF" ] || { red "缺少配置:$SB_CONF"; pause; return 1; }
@@ -1681,8 +1486,7 @@ foreground_sbox_log(){
   local bak="${SB_CONF}.bak.fg.$(date +%s)"
   cp -a "$SB_CONF" "$bak"
 
-  if ! jq '.log.disabled=false | .log.level="debug" | .log.timestamp=true' \
-      "$SB_CONF" > "${SB_CONF}.tmp"; then
+  if ! jq '.log.disabled=false | .log.level="debug" | .log.timestamp=true' "$SB_CONF" > "${SB_CONF}.tmp"; then
     red "写入日志配置失败"
     rm -f "${SB_CONF}.tmp" "$bak"
     pause
@@ -1803,9 +1607,6 @@ foreground_xray_log(){
   pause
 }
 
-# =========================
-# Restart Cron
-# =========================
 setup_cron_env(){
   command -v crontab >/dev/null 2>&1 && return
   if command -v apt-get >/dev/null 2>&1; then pkg_install cron; svc enable cron; svc start cron
@@ -1813,7 +1614,7 @@ setup_cron_env(){
   else pkg_install cronie; svc enable crond; svc start crond; fi
 }
 manage_restart_hours(){
-  title "定时重启" "$C_RESTART_KEY"
+  title "定时重启" "$C_RESTART_K"
   green "当前间隔:${RESTART_HOURS}小时(0=关闭)"
   prompt "输入间隔小时:" h
   [[ "$h" =~ ^[0-9]+$ ]] || { red "输入无效"; return; }
@@ -1840,9 +1641,6 @@ manage_restart_hours(){
   green "已设置每${RESTART_HOURS}小时重启(xray/tuic-box/argo)"
 }
 
-# =========================
-# Swap
-# =========================
 swap_cleanup_fstab(){ [ -f /etc/fstab ] && sed -i '/^\/swapfile[[:space:]]/d' /etc/fstab; }
 swap_disable_all(){
   awk 'NR>1{print $1}' /proc/swaps 2>/dev/null | while read -r d; do [ -n "$d" ] && swapoff "$d" >/dev/null 2>&1 || true; done
@@ -1901,17 +1699,17 @@ create_swap_best(){
 }
 manage_swap(){
   while true; do
-    title "SWAP管理" "$C_SWAP_KEY"
+    title "Swap管理" "$C_SWAP_K"
     local ram sw
     ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null); [ -z "$ram" ] && ram=0
     sw=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null); [ -z "$sw" ] && sw=0
     echo "RAM:${ram}MB  SWAP:${sw}MB"
-    hr 66 "$C_SWAP_KEY"
+    hr 64 "$C_SWAP_K"
 
     render_two_col_menu \
-      "1|i|安装/修改Swap|2|d|卸载Swap" \
-      "0|d|返回|||"
-    hr 66 "$C_SWAP_KEY"
+      "1|安装/修改Swap|2|卸载Swap" \
+      "0|返回|"
+    hr 64 "$C_SWAP_K"
 
     prompt "请选择:" c
     case "$c" in
@@ -1923,9 +1721,6 @@ manage_swap(){
   done
 }
 
-# =========================
-# Shortcut / Uninstall
-# =========================
 install_shortcut(){
   mkdir -p "$WORK"
   local mark="${WORK}/.shortcut_done" src dst="/usr/local/bin/ssgo"
@@ -1967,12 +1762,9 @@ full_uninstall(){
   green "已彻底卸载"
 }
 
-# =========================
-# Menus
-# =========================
 manage_outbound_menu(){
   while true; do
-    title "出站管理(Xray+Sbox)" "$C_OUTBOUND"
+    title "出站管理(Xray+Sbox)" "$C_OUTBOUND_K"
 
     local merged_list merged_json merged_disp
     merged_list="$(merge_csv "$V6_COMPAT_SITES" "$V6_STRICT_SITES")"
@@ -1984,12 +1776,12 @@ manage_outbound_menu(){
     echo -e "YouTube模式:${C_INFO}$(yt_mode_str)${C_RST}"
     echo -e "IPv6出站列表:${C_INFO}$(clip_text "$merged_disp" 58)${C_RST}"
 
-    hr 66 "$C_OUTBOUND"
+    hr 64 "$C_OUTBOUND_K"
     render_two_col_menu \
-      "1|m|设置YouTube模式|2|i|添加IPv6规则" \
-      "3|d|删除IPv6规则|4|r|重启服务应用规则" \
-      "0|d|返回|||"
-    hr 66 "$C_OUTBOUND"
+      "1|设置YouTube模式|2|添加IPv6规则" \
+      "3|删除IPv6规则|4|重启服务应用规则" \
+      "0|返回|"
+    hr 64 "$C_OUTBOUND_K"
 
     prompt "请选择:" c
     case "$c" in
@@ -2052,7 +1844,6 @@ manage_outbound_menu(){
   done
 }
 
-# 你指定的Xray管理排版逻辑
 xray_menu(){
   while true; do
     local xs as hs
@@ -2072,21 +1863,18 @@ xray_menu(){
       hs="${C_BAD}未配置${C_RST}"
     fi
 
-    title "Xray管理" "$C_XRAY"
-    echo -e "${C_XRAY}Xray${C_RST}:${xs}   ${C_ARGO}Argo${C_RST}:${as}   ${C_HY2}HY2${C_RST}:${hs}"
-    hr 66 "$C_XRAY"
-    module_head "功能菜单(双列)" "$C_XRAY"
+    title "Xray管理" "$C_XRAY_K"
+    echo -e "${C_XRAY_K}Xray${C_RST}:${xs}   ${C_ARGO}Argo${C_RST}:${as}   ${C_HY2}HY2${C_RST}:${hs}"
+    hr 64 "$C_XRAY_K"
 
-    # 左列: 安装Argo、安装HY2、配置Socks5、配置免流、重启、卸载
-    # 右列: 查看节点、修改UUID、实时日志、返回
     render_two_col_menu \
-      "1|i|安装Argo|6|v|查看节点" \
-      "2|i|安装HY2|7|m|修改UUID" \
-      "3|n|配置Socks5|8|v|实时日志" \
-      "4|n|配置免流|0|d|返回" \
-      "5|r|重启Xray与Argo|9|d|卸载Xray"
-    hr 66 "$C_XRAY"
+      "1|安装Argo|6|查看节点" \
+      "2|安装HY2|7|修改UUID" \
+      "3|配置Socks5|8|实时日志" \
+      "4|配置免流|0|返回" \
+      "5|重启Xray与Argo|9|卸载Xray"
 
+    hr 64 "$C_XRAY_K"
     prompt "请选择:" c
     case "$c" in
       1) install_argo; pause ;;
@@ -2096,7 +1884,8 @@ xray_menu(){
       5)
         service_exists xray && svc restart xray
         service_exists tunnel-argo && svc restart tunnel-argo
-        green "重启完成"; pause
+        green "重启完成"
+        pause
         ;;
       6) show_xray_nodes; pause ;;
       7) prompt "新UUID(回车自动):" u; [ -z "$u" ] && u="$(gen_uuid)"; set_xray_uuid "$u"; pause ;;
@@ -2124,16 +1913,16 @@ sbox_menu(){
       st="${C_BAD}未安装${C_RST}"
     fi
 
-    title "Sbox管理" "$C_SBOX"
-    echo -e "Sbox:${st}"
-    hr 66 "$C_SBOX"
+    title "Sbox管理" "$C_SBOX_K"
+    echo -e "${C_SBOX_K}Sbox${C_RST}:${st}"
+    hr 64 "$C_SBOX_K"
 
     render_two_col_menu \
-      "1|i|安装Tuic|2|v|查看节点" \
-      "3|r|重启Tuic|5|v|实时日志" \
-      "4|d|卸载Tuic|0|d|返回"
+      "1|安装Tuic|2|查看节点" \
+      "3|重启Tuic|5|实时日志" \
+      "4|卸载Tuic|0|返回"
 
-    hr 66 "$C_SBOX"
+    hr 64 "$C_SBOX_K"
     prompt "请选择:" c
     case "$c" in
       1) install_tuic; pause ;;
@@ -2208,17 +1997,13 @@ main_menu(){
       [ "$mt" -gt "${IP_CACHE_MTIME:-0}" ] && IP_CACHE_MTIME="$mt" && load_ip_cache >/dev/null 2>&1 || true
     }
 
-    local info mem u4 u6 e4 e6 cols
+    local info mem u4 u6 cols
     info="$(sys_info)"
     mem="$(mem_used_disp)"
     cols="$(term_cols)"
 
-    e4="$EMOJI4"; e6="$EMOJI6"
-    printf '%s' "$e4" | grep -q '[🇦-🇿]' || e4=""
-    printf '%s' "$e6" | grep -q '[🇦-🇿]' || e6=""
-
     if [ -n "$WAN4" ]; then
-      u4="${WAN4}(${e4:+$e4 }${COUNTRY4:-??} ${ISP4:-unknown})"
+      u4="${WAN4}(${COUNTRY4:-??} ${ISP4:-unknown})"
       u4="$(clip_text "$u4" "$((cols-8))")"
       u4="${C_INFO}${u4}${C_RST}"
     else
@@ -2226,7 +2011,7 @@ main_menu(){
     fi
 
     if [ -n "$WAN6" ]; then
-      u6="${WAN6}(${e6:+$e6 }${COUNTRY6:-??} ${ISP6:-unknown})"
+      u6="${WAN6}(${COUNTRY6:-??} ${ISP6:-unknown})"
       u6="$(clip_text "$u6" "$((cols-8))")"
       u6="${C_INFO}${u6}${C_RST}"
     else
@@ -2237,17 +2022,16 @@ main_menu(){
     echo -e "v4 :${u4}"
     echo -e "v6 :${u6}"
     echo -e "Mem:${C_INFO}${mem}${C_RST}"
-    hr 66 "$C_TITLE"
-    module_head "主页菜单(左列1234/右列5690)" "$C_TITLE"
+    hr 64 "$C_TITLE"
+    printf "%b【主页菜单(左列1234/右列5690)】%b\n" "$C_TITLE" "$C_RST"
 
-    # 按你要求：首页1234左列，5690右列
     render_two_col_menu \
-      "1|xray|管理Xray|5|swapk|管理Swap" \
-      "2|sbox|管理Sbox|6|shortcutk|创建快捷" \
-      "3|outbound|管理出站|9|d|彻底卸载" \
-      "4|restartk|定时重启|0|d|退出"
+      "1|管理Xray|5|管理Swap" \
+      "2|管理Sbox|6|创建快捷" \
+      "3|管理出站|9|彻底卸载" \
+      "4|定时重启|0|退出"
 
-    hr 66 "$C_TITLE"
+    hr 64 "$C_TITLE"
     prompt "请选择:" c
     case "$c" in
       1) xray_menu ;;
