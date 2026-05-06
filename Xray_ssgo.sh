@@ -16,6 +16,7 @@ C_TUIC="\033[1;35m"
 C_SBOX="\033[1;35m"
 C_POLICY="\033[1;35m"
 C_SHORTCUT="\033[1;35m"
+C_HY2="\033[1;35m"
 
 C_OUTBOUND="\033[1;33m"
 C_FREEFLOW="\033[1;33m"
@@ -59,6 +60,7 @@ FREEFLOW_CONF="${WORK}/freeflow.conf"
 RESTART_CONF="${WORK}/restart.conf"
 OUTBOUND_CONF="${WORK}/outbound_policy.conf"
 IPCACHE="${WORK}/ip_cache.conf"
+HY2_STATE="${WORK}/hy2_state.conf"
 
 SWAP_LOG="/tmp/swap.log"
 
@@ -74,9 +76,8 @@ RESTART_HOURS=0
 XHTTP_MODE="auto"
 XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPaddingPlacement":"queryInHeader","xPaddingHeader":"y2k","xPaddingKey":"_y2k"}'
 
-# YouTube 模式：0=关闭 1=兼容(优先v6可回落) 2=严格(禁v4回落)
+# YouTube 模式：0关闭 1兼容 2严格
 YOUTUBE_MODE=0
-# 手动域名列表：逗号分隔
 V6_COMPAT_SITES=""
 V6_STRICT_SITES=""
 
@@ -182,7 +183,6 @@ detect_cloudflared_arch(){
     *) echo "" ;;
   esac
 }
-# Alpine 用 musl 包
 detect_singbox_suffix(){
   case "$(uname -m)" in
     x86_64|amd64)
@@ -275,9 +275,32 @@ country_flag(){
   o2=$(printf '%d' "'${cc:1:1}")
   printf "\\U1F1$(printf '%X' $((o1-65+0xE6)))\\U1F1$(printf '%X' $((o2-65+0xE6)))"
 }
+normalize_country_code(){
+  local c="$(echo "${1:-}" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  local cu="$(echo "$c" | tr '[:lower:]' '[:upper:]')"
+
+  if [ ${#cu} -eq 2 ] && echo "$cu" | grep -Eq '^[A-Z]{2}$'; then
+    echo "$cu"; return
+  fi
+
+  case "$c" in
+    新加坡) echo "SG" ;;
+    日本) echo "JP" ;;
+    香港) echo "HK" ;;
+    台湾) echo "TW" ;;
+    美国) echo "US" ;;
+    英国) echo "GB" ;;
+    德国) echo "DE" ;;
+    法国) echo "FR" ;;
+    韩国) echo "KR" ;;
+    马来西亚) echo "MY" ;;
+    印度) echo "IN" ;;
+    俄罗斯) echo "RU" ;;
+    *) echo "$cu" ;;
+  esac
+}
 clean_isp(){
   local s="$1"
-  # 去除前缀 AS12345 / ASAS12345 等异常样式
   s="$(echo "$s" | sed -E 's/^AS(AS)?[0-9]+[[:space:]]+//I')"
   s="${s#AS[0-9]* }"
   s="$(echo "$s" | sed -E 's/[[:space:],]+$//; s/^[[:space:],]+//')"
@@ -315,6 +338,7 @@ apply_base_name(){
   else
     cc="${COUNTRY6^^}"; isp="$ISP6"; emo="$EMOJI6"
   fi
+  if [ -z "$emo" ]; then emo="$(country_flag "$cc" 2>/dev/null || true)"; fi
   if [ -n "$emo" ] && [ -n "$cc" ]; then
     BASE_REGION="${emo} ${cc}"
   elif [ -n "$cc" ]; then
@@ -354,12 +378,13 @@ fill_by_ipinfo_ip(){
   if [ -z "$j" ] || ! echo "$j" | jq -e '.ip' >/dev/null 2>&1; then
     org="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/org" 2>/dev/null || true)"
     cc="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/country" 2>/dev/null || true)"
+    cc="$(normalize_country_code "$cc")"
     if [ "$fam" = "4" ]; then
-      WAN4="$ip"; COUNTRY4="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
+      WAN4="$ip"; COUNTRY4="$cc"
       EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
       ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
     else
-      WAN6="$ip"; COUNTRY6="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
+      WAN6="$ip"; COUNTRY6="$cc"
       EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
       ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
     fi
@@ -367,15 +392,16 @@ fill_by_ipinfo_ip(){
   fi
 
   cc="$(echo "$j" | jq -r '.country // empty' 2>/dev/null || true)"
+  cc="$(normalize_country_code "$cc")"
   org="$(echo "$j" | jq -r '.org // empty' 2>/dev/null || true)"
   if [ "$fam" = "4" ]; then
     WAN4="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
-    COUNTRY4="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
+    COUNTRY4="$cc"
     EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
     ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
   else
     WAN6="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
-    COUNTRY6="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
+    COUNTRY6="$cc"
     EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
     ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
   fi
@@ -389,17 +415,23 @@ parse_cf_json(){
   local ip cc emo asn isp
   ip="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
   cc="$(echo "$j" | jq -r '.country // empty' 2>/dev/null || true)"
+  cc="$(normalize_country_code "$cc")"
   emo="$(echo "$j" | jq -r '.emoji // empty' 2>/dev/null || true)"
   asn="$(echo "$j" | jq -r '.asn // empty' 2>/dev/null || true)"
   isp="$(echo "$j" | jq -r '.isp // empty' 2>/dev/null || true)"
   [ -z "$ip" ] && return 1
 
+  # emoji 兜底：若不是实际旗帜字符则重算
+  if ! printf '%s' "$emo" | grep -q '[🇦-🇿]'; then
+    emo=""
+  fi
+
   if [ "$fam" = "4" ]; then
-    WAN4="$ip"; COUNTRY4="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
+    WAN4="$ip"; COUNTRY4="$cc"
     EMOJI4="$emo"; [ -z "$EMOJI4" ] && EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
     ISP4="$(clean_isp "${asn:+AS${asn} }${isp}")"; [ -z "$ISP4" ] && ISP4="$(clean_isp "$isp")"; [ -z "$ISP4" ] && ISP4="unknown"
   else
-    WAN6="$ip"; COUNTRY6="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
+    WAN6="$ip"; COUNTRY6="$cc"
     EMOJI6="$emo"; [ -z "$EMOJI6" ] && EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
     ISP6="$(clean_isp "${asn:+AS${asn} }${isp}")"; [ -z "$ISP6" ] && ISP6="$(clean_isp "$isp")"; [ -z "$ISP6" ] && ISP6="unknown"
   fi
@@ -471,6 +503,51 @@ check_ip(){
   IP_CHECKED=1
   save_ip_cache || true
   return 0
+}
+
+# ========== Domain helpers ==========
+normalize_domain_item(){
+  local s="$1"
+  s="${s#http://}"; s="${s#https://}"
+  s="${s%%/*}"; s="${s%%:*}"
+  s="$(echo "$s" | tr '[:upper:]' '[:lower:]' | sed 's/^ *//;s/ *$//;s/^\.*//')"
+  echo "$s"
+}
+merge_csv(){
+  local a="$1" b="$2"
+  if [ -z "$a" ]; then echo "$b"; return; fi
+  if [ -z "$b" ]; then echo "$a"; return; fi
+  echo "${a},${b}"
+}
+csv_to_json_unique(){
+  local d="$1"
+  local raw_arr=() clean_arr=() item
+  IFS=',' read -r -a raw_arr <<< "$d"
+  for item in "${raw_arr[@]}"; do
+    item="$(normalize_domain_item "$item")"
+    [ -z "$item" ] && continue
+    clean_arr+=("$item")
+  done
+  printf '%s\n' "${clean_arr[@]}" | awk 'NF' | sort -u | jq -Rsc 'split("\n")|map(select(length>0))'
+}
+yt_domains_csv(){ echo "youtube.com,youtu.be,googlevideo.com,ytimg.com"; }
+build_v6_compat_domains_json(){
+  local d="$V6_COMPAT_SITES"
+  [ "$YOUTUBE_MODE" = "1" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
+  csv_to_json_unique "$d"
+}
+build_v6_strict_domains_json(){
+  local d="$V6_STRICT_SITES"
+  [ "$YOUTUBE_MODE" = "2" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
+  csv_to_json_unique "$d"
+}
+yt_mode_str(){
+  case "$YOUTUBE_MODE" in
+    0) echo "关闭" ;;
+    1) echo "兼容" ;;
+    2) echo "严格" ;;
+    *) echo "关闭" ;;
+  esac
 }
 
 # ========== Xray ==========
@@ -575,48 +652,11 @@ EOF
   green "Xray 安装完成"
 }
 
-# ========== Outbound ==========
-normalize_domain_item(){
-  local s="$1"
-  s="${s#http://}"; s="${s#https://}"
-  s="${s%%/*}"; s="${s%%:*}"
-  s="$(echo "$s" | tr '[:upper:]' '[:lower:]' | sed 's/^ *//;s/ *$//;s/^\.*//')"
-  echo "$s"
-}
-merge_csv(){
-  local a="$1" b="$2"
-  if [ -z "$a" ]; then echo "$b"; return; fi
-  if [ -z "$b" ]; then echo "$a"; return; fi
-  echo "${a},${b}"
-}
-csv_to_json_unique(){
-  local d="$1"
-  local raw_arr=() clean_arr=() item
-  IFS=',' read -r -a raw_arr <<< "$d"
-  for item in "${raw_arr[@]}"; do
-    item="$(normalize_domain_item "$item")"
-    [ -z "$item" ] && continue
-    clean_arr+=("$item")
-  done
-  printf '%s\n' "${clean_arr[@]}" | awk 'NF' | sort -u | jq -Rsc 'split("\n")|map(select(length>0))'
-}
-yt_domains_csv(){
-  echo "youtube.com,youtu.be,googlevideo.com,ytimg.com"
-}
-build_v6_compat_domains_json(){
-  local d="$V6_COMPAT_SITES"
-  [ "$YOUTUBE_MODE" = "1" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
-  csv_to_json_unique "$d"
-}
-build_v6_strict_domains_json(){
-  local d="$V6_STRICT_SITES"
-  [ "$YOUTUBE_MODE" = "2" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
-  csv_to_json_unique "$d"
-}
-
+# ========== Outbound apply ==========
 apply_policy_xray(){
   [ -f "$XRAY_CONF" ] || return 0
   ensure_dns_rule
+
   update_xray '
     .outbounds |= (
       map(select(.tag!="direct" and .tag!="direct-v4" and .tag!="direct-v6" and .tag!="block-v4"))
@@ -631,7 +671,6 @@ apply_policy_xray(){
   compat="$(build_v6_compat_domains_json)"
   strict="$(build_v6_strict_domains_json)"
 
-  # 严格：先拒绝 IPv4 目的，再路由 IPv6
   if [ "$(echo "$strict" | jq 'length')" -gt 0 ]; then
     update_xray --argjson d "$strict" \
       '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"ip":["0.0.0.0/0"],"outboundTag":"block-v4","tag":"v6-strict-reject-rule"}]'
@@ -639,7 +678,6 @@ apply_policy_xray(){
       '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-strict-route-rule"}]'
   fi
 
-  # 兼容：仅路由 IPv6，不 reject IPv4
   if [ "$(echo "$compat" | jq 'length')" -gt 0 ]; then
     update_xray --argjson d "$compat" \
       '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-compat-rule"}]'
@@ -801,7 +839,6 @@ EOF
   apply_policy_all || true
   green "Argo 配置完成"
 }
-
 uninstall_argo(){
   svc stop tunnel-argo
   svc disable tunnel-argo
@@ -813,6 +850,134 @@ uninstall_argo(){
   fi
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
   green "Argo 已卸载"
+}
+
+# ========== HY2 on Xray ==========
+hy2_exists(){
+  jq -e '.inbounds[]? | select(.protocol=="hysteria2" and .tag=="hy2-in")' "$XRAY_CONF" >/dev/null 2>&1
+}
+write_hy2_state(){
+  local port="$1" domain="$2" pass="$3" up="$4" down="$5" obfs="$6"
+  mkdir -p "$WORK"
+  {
+    echo "PORT=$port"
+    echo "DOMAIN=$domain"
+    echo "PASS=$pass"
+    echo "UP=$up"
+    echo "DOWN=$down"
+    echo "OBFS=$obfs"
+  } > "$HY2_STATE"
+}
+show_hy2_node(){
+  cls
+  if [ ! -f "$HY2_STATE" ]; then
+    red "HY2未安装"
+    return
+  fi
+  # shellcheck disable=SC1090
+  . "$HY2_STATE" 2>/dev/null || { red "HY2状态文件损坏"; return; }
+  [ -z "${PORT:-}" ] && { red "HY2状态不完整"; return; }
+  [ -z "${DOMAIN:-}" ] && { red "HY2状态不完整"; return; }
+  [ -z "${PASS:-}" ] && { red "HY2状态不完整"; return; }
+
+  local name link
+  [ -z "$BASE_FULL" ] && BASE_FULL="Node"
+  name="${BASE_FULL} - HY2"
+  link="hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}#$(url_encode "$name")"
+
+  green "=============== HY2 节点 ==============="
+  purple "$link"
+  echo "========================================="
+}
+install_hy2(){
+  install_xray || return 1
+  ensure_dns_rule || return 1
+
+  local domain token port pass obfs prof up down
+  prompt "HY2域名: " domain
+  [ -z "$domain" ] && { red "域名不能为空"; return 1; }
+  prompt "Cloudflare API Token: " token
+  [ -z "$token" ] && { red "Token不能为空"; return 1; }
+
+  prompt "HY2端口(默认24443): " port
+  [ -z "$port" ] && port=24443
+  [[ "$port" =~ ^[0-9]+$ ]] || { red "端口无效"; return 1; }
+
+  prompt "HY2密码(回车随机UUID): " pass
+  [ -z "$pass" ] && pass="$(gen_uuid)"
+
+  prompt "HY2混淆密码(回车随机UUID): " obfs
+  [ -z "$obfs" ] && obfs="$(gen_uuid)"
+
+  echo "带宽档位: 1.温和(50/100) 2.均衡(100/200) 3.激进(200/500) 4.自定义"
+  prompt "选择(默认1): " prof
+  case "$prof" in
+    2) up=100; down=200 ;;
+    3) up=200; down=500 ;;
+    4)
+      prompt "上行Mbps(默认100): " up
+      prompt "下行Mbps(默认200): " down
+      [ -z "$up" ] && up=100
+      [ -z "$down" ] && down=200
+      [[ "$up" =~ ^[0-9]+$ ]] || up=100
+      [[ "$down" =~ ^[0-9]+$ ]] || down=200
+      ;;
+    *) up=50; down=100 ;;
+  esac
+
+  issue_cert_cf "$domain" "$token" || return 1
+  open_port "$port" udp
+
+  # 清理旧 hy2-in
+  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or (.protocol=="hysteria2" and .port==24443)))'
+
+  local hy2
+  hy2="$(jq -nc \
+    --argjson p "$port" \
+    --arg pass "$pass" \
+    --arg obfs "$obfs" \
+    --arg domain "$domain" \
+    --arg up "${up} mbps" \
+    --arg down "${down} mbps" \
+    --arg crt "${TLS_DIR}/${domain}.crt" \
+    --arg key "${TLS_DIR}/${domain}.key" \
+'{
+  "tag":"hy2-in",
+  "listen":"::",
+  "port":$p,
+  "protocol":"hysteria2",
+  "settings":{
+    "password":$pass,
+    "obfs":{"type":"salamander","password":$obfs}
+  },
+  "streamSettings":{
+    "network":"hy2",
+    "hy2Settings":{
+      "upMbps":($up|split(" ")[0]|tonumber),
+      "downMbps":($down|split(" ")[0]|tonumber)
+    },
+    "security":"tls",
+    "tlsSettings":{
+      "alpn":["h3"],
+      "certificates":[{"certificateFile":$crt,"keyFile":$key}],
+      "serverName":$domain
+    }
+  },
+  "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}
+}')"
+
+  update_xray --argjson ib "$hy2" '.inbounds += [$ib]'
+
+  svc restart xray
+  write_hy2_state "$port" "$domain" "$pass" "$up" "$down" "$obfs"
+  green "HY2 安装成功（Xray）"
+}
+uninstall_hy2(){
+  [ -f "$XRAY_CONF" ] || { red "xray未安装"; return 1; }
+  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or .protocol=="hysteria2"))'
+  rm -f "$HY2_STATE"
+  svc restart xray
+  green "HY2 已卸载"
 }
 
 # ========== Nodes ==========
@@ -828,6 +993,7 @@ show_xray_nodes(){
   [ -z "$BASE_FULL" ] && BASE_FULL="Node"
 
   green "=============== 节点链接 ================"
+
   if [ -f "$ARGO_DOMAIN" ]; then
     local d xextra nx nw ns
     d="$(cat "$ARGO_DOMAIN")"
@@ -879,13 +1045,36 @@ show_xray_nodes(){
     done <<< "$sl"
   fi
 
+  if [ -f "$HY2_STATE" ]; then
+    # shellcheck disable=SC1090
+    . "$HY2_STATE" 2>/dev/null || true
+    if [ -n "${PORT:-}" ] && [ -n "${DOMAIN:-}" ] && [ -n "${PASS:-}" ] && [ -n "${OBFS:-}" ]; then
+      local hn
+      hn="${BASE_FULL} - HY2"
+      purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}#$(url_encode "$hn")"; echo
+      cnt=$((cnt+1))
+    fi
+  fi
+
   [ "$cnt" -eq 0 ] && yellow "暂无配置节点"
   echo "=========================================="
 }
 
 # ========== Socks5 ==========
 manage_socks5(){
-  [ -f "$XRAY_CONF" ] || { red "请先安装xray"; pause; return; }
+  if [ ! -f "$XRAY_CONF" ]; then
+    cls
+    red "未检测到 Xray"
+    echo "1. 立即安装 Xray"
+    echo "0. 返回"
+    prompt "请选择: " k
+    case "$k" in
+      1) install_xray || { red "安装失败"; pause; return; } ;;
+      0) return ;;
+      *) return ;;
+    esac
+  fi
+
   ensure_dns_rule || { red "初始化失败"; pause; return; }
 
   while true; do
@@ -908,10 +1097,10 @@ manage_socks5(){
       done <<< "$list"
     fi
     echo "-----------------------------------------------"
-    echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_SOCKS5}Socks5${C_RST}"
-    echo -e "${C_MODIFY} 2.${C_RST} ${C_MODIFY}修改${C_RST}${C_SOCKS5}Socks5${C_RST}"
-    echo -e "${C_BAD} 3.${C_RST} ${C_BAD}卸载${C_RST}${C_SOCKS5}Socks5${C_RST}"
-    echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
+    echo -e "${C_INSTALL} 1.${C_RST} 安装Socks5"
+    echo -e "${C_MODIFY} 2.${C_RST} 修改Socks5"
+    echo -e "${C_BAD} 3.${C_RST} 卸载Socks5"
+    echo -e "${C_BAD} 0.${C_RST} 返回"
     echo "==============================================="
     prompt "请选择: " c
     case "$c" in
@@ -974,7 +1163,19 @@ apply_freeflow(){
   svc restart xray
 }
 manage_freeflow(){
-  [ -f "$XRAY_CONF" ] || { red "请先安装xray"; pause; return; }
+  if [ ! -f "$XRAY_CONF" ]; then
+    cls
+    red "未检测到 Xray"
+    echo "1. 立即安装 Xray"
+    echo "0. 返回"
+    prompt "请选择: " k
+    case "$k" in
+      1) install_xray || { red "安装失败"; pause; return; } ;;
+      0) return ;;
+      *) return ;;
+    esac
+  fi
+
   while true; do
     cls
     local s="${C_BAD}未配置${C_RST}"
@@ -985,19 +1186,20 @@ manage_freeflow(){
     echo -e "${C_FREEFLOW}=============== 免流管理 ===============${C_RST}"
     printf "当前: %b\n" "$s"
     echo "-----------------------------------------------"
-    echo -e "${C_MODIFY} 1.${C_RST} ${C_MODIFY}修改${C_RST}${C_FREEFLOW}免流方式${C_RST}"
-    echo -e "${C_MODIFY} 2.${C_RST} ${C_MODIFY}修改${C_RST}${C_FREEFLOW}免流路径${C_RST}"
-    echo -e "${C_BAD} 3.${C_RST} ${C_BAD}卸载${C_RST}${C_FREEFLOW}免流${C_RST}"
-    echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
+    echo -e "${C_MODIFY} 1.${C_RST} 修改免流方式"
+    echo -e "${C_MODIFY} 2.${C_RST} 修改免流路径"
+    echo -e "${C_BAD} 3.${C_RST} 卸载免流"
+    echo -e "${C_BAD} 0.${C_RST} 返回"
     echo "==============================================="
     prompt "请选择: " c
     case "$c" in
       1)
-        echo; green "请选择免流方式"
+        echo
+        green "请选择免流方式"
         echo "-----------------------------------------------"
-        echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_FREEFLOW}免流${C_RST} + WS"
-        echo -e "${C_INSTALL} 2.${C_RST} ${C_INSTALL}安装${C_RST}${C_FREEFLOW}免流${C_RST} + HTTPUpgrade"
-        echo -e "${C_BAD} 3.${C_RST} ${C_BAD}卸载${C_RST}${C_FREEFLOW}免流${C_RST}"
+        echo " 1. WS"
+        echo " 2. HTTPUpgrade"
+        echo " 3. 关闭"
         echo "-----------------------------------------------"
         prompt "请选择: " k
         case "$k" in
@@ -1307,7 +1509,7 @@ uninstall_tuic(){
   green "Sbox 已卸载"
 }
 
-# 前台查看 sing-box 日志（DEBUG）
+# ========== Foreground logs ==========
 foreground_sbox_log(){
   [ -x "$SB_BIN" ] || { red "sing-box 未安装"; pause; return 1; }
   [ -f "$SB_CONF" ] || { red "缺少配置: $SB_CONF"; pause; return 1; }
@@ -1317,7 +1519,7 @@ foreground_sbox_log(){
 
   if ! jq '.log.disabled=false | .log.level="debug" | .log.timestamp=true' \
       "$SB_CONF" > "${SB_CONF}.tmp"; then
-    red "写入 DEBUG 日志配置失败"
+    red "写入日志配置失败"
     rm -f "${SB_CONF}.tmp" "$bak"
     pause
     return 1
@@ -1333,13 +1535,13 @@ foreground_sbox_log(){
     return 1
   fi
 
-  yellow "即将停止 tuic-box 后台服务并前台输出 DEBUG 日志..."
+  yellow "即将停止 tuic-box 后台服务并前台输出日志..."
   svc stop tuic-box || true
   pkill -f "^${SB_BIN} run -c ${SB_CONF}$" >/dev/null 2>&1 || true
   pkill -x sing-box >/dev/null 2>&1 || true
   sleep 1
 
-  green "前台 DEBUG 日志已启动（Ctrl+C 退出）"
+  green "前台日志已启动（Ctrl+C 退出）"
   echo "日志文件: /tmp/sb-live.log"
 
   local old_int_trap
@@ -1370,7 +1572,6 @@ foreground_sbox_log(){
   pause
 }
 
-# 新增：前台查看 xray 日志（DEBUG）
 foreground_xray_log(){
   [ -x "$XRAY_BIN" ] || { red "xray 未安装"; pause; return 1; }
   [ -f "$XRAY_CONF" ] || { red "缺少配置: $XRAY_CONF"; pause; return 1; }
@@ -1378,7 +1579,6 @@ foreground_xray_log(){
   local bak="${XRAY_CONF}.bak.fg.$(date +%s)"
   cp -a "$XRAY_CONF" "$bak"
 
-  # 为了前台可见，临时把 access/error 输出到 stdout（空字符串）+ debug
   if ! jq '
       .log = (.log // {})
       | .log.access = ""
@@ -1386,7 +1586,7 @@ foreground_xray_log(){
       | .log.loglevel = "debug"
       | .log.dnsLog = true
     ' "$XRAY_CONF" > "${XRAY_CONF}.tmp"; then
-    red "写入 Xray DEBUG 日志配置失败"
+    red "写入 Xray 日志配置失败"
     rm -f "${XRAY_CONF}.tmp" "$bak"
     pause
     return 1
@@ -1402,13 +1602,13 @@ foreground_xray_log(){
     return 1
   fi
 
-  yellow "即将停止 xray 后台服务并前台输出 DEBUG 日志..."
+  yellow "即将停止 xray 后台服务并前台输出日志..."
   svc stop xray || true
   pkill -f "^${XRAY_BIN} run -c ${XRAY_CONF}$" >/dev/null 2>&1 || true
   pkill -x xray >/dev/null 2>&1 || true
   sleep 1
 
-  green "前台 DEBUG 日志已启动（Ctrl+C 退出）"
+  green "前台日志已启动（Ctrl+C 退出）"
   echo "日志文件: /tmp/xray-live.log"
 
   local old_int_trap
@@ -1597,91 +1797,82 @@ full_uninstall(){
 }
 
 # ========== Menus ==========
-yt_mode_str(){
-  case "$YOUTUBE_MODE" in
-    0) echo "关闭" ;;
-    1) echo "兼容" ;;
-    2) echo "严格" ;;
-    *) echo "关闭" ;;
-  esac
-}
 manage_outbound_menu(){
   while true; do
     cls
-    local yst
-    yst="$(yt_mode_str)"
+
+    local merged_list merged_json merged_disp
+    merged_list="$(merge_csv "$V6_COMPAT_SITES" "$V6_STRICT_SITES")"
+    merged_json="$(csv_to_json_unique "$merged_list")"
+    merged_disp="$(echo "$merged_json" | jq -r 'join(",")')"
+    [ -z "$merged_disp" ] && merged_disp="（空）"
+
     echo -e "${C_OUTBOUND}========== 出站管理（Xray + Sbox）==========${C_RST}"
     echo -e "默认出站: \033[1;36mIPv4\033[0m"
-    echo -e "YouTube模式: \033[1;36m${yst}\033[0m"
-    echo -e "IPv6兼容规则: \033[1;36m${V6_COMPAT_SITES:-（空）}\033[0m"
-    echo -e "IPv6严格规则: \033[1;36m${V6_STRICT_SITES:-（空）}\033[0m"
+    echo -e "YouTube模式: \033[1;36m$(yt_mode_str)\033[0m"
+    echo -e "IPv6出站列表: \033[1;36m${merged_disp}\033[0m"
     echo "-----------------------------------------------"
     echo -e "\033[1;32m 1.\033[0m 设置YouTube模式（0关闭/1兼容/2严格）"
-    echo -e "\033[1;36m 2.\033[0m 添加IPv6兼容规则"
-    echo -e "\033[1;36m 3.\033[0m 添加IPv6严格规则"
-    echo -e "\033[1;91m 4.\033[0m 删除IPv6兼容规则"
-    echo -e "\033[1;91m 5.\033[0m 删除IPv6严格规则"
-    echo -e "${C_BAD} 6.${C_RST} ${C_BAD}重启${C_RST}${C_OUTBOUND}服务应用规则${C_RST}"
+    echo -e "\033[1;36m 2.\033[0m 添加IPv6规则"
+    echo -e "\033[1;91m 3.\033[0m 删除IPv6规则"
+    echo -e "${C_BAD} 4.${C_RST} ${C_BAD}重启${C_RST}${C_OUTBOUND}服务应用规则${C_RST}"
     echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
     echo "==============================================="
     prompt "请选择: " c
     case "$c" in
       1)
-        prompt "输入模式(0/1/2): " m
+        prompt "输入模式(0关闭/1兼容/2严格): " m
         [[ "$m" =~ ^[012]$ ]] || { red "输入无效"; pause; continue; }
-        YOUTUBE_MODE="$m"; save_outbound; apply_policy_all; green "YouTube模式已更新并应用"; pause
+        YOUTUBE_MODE="$m"; save_outbound; apply_policy_all; green "已更新并应用"; pause
         ;;
       2)
+        local s md
         prompt "输入域名(逗号分隔): " s
         [ -z "$s" ] && { red "不能为空"; pause; continue; }
-        [ -z "$V6_COMPAT_SITES" ] && V6_COMPAT_SITES="$s" || V6_COMPAT_SITES="${V6_COMPAT_SITES},${s}"
-        V6_COMPAT_SITES="$(echo "$V6_COMPAT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
-        save_outbound; apply_policy_all; green "已添加兼容规则并应用"; pause
+        echo "选择模式：1=兼容 2=严格"
+        prompt "输入模式: " md
+        case "$md" in
+          1)
+            [ -z "$V6_COMPAT_SITES" ] && V6_COMPAT_SITES="$s" || V6_COMPAT_SITES="${V6_COMPAT_SITES},${s}"
+            V6_COMPAT_SITES="$(echo "$V6_COMPAT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
+            ;;
+          2)
+            [ -z "$V6_STRICT_SITES" ] && V6_STRICT_SITES="$s" || V6_STRICT_SITES="${V6_STRICT_SITES},${s}"
+            V6_STRICT_SITES="$(echo "$V6_STRICT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
+            ;;
+          *) red "模式无效"; pause; continue ;;
+        esac
+        save_outbound; apply_policy_all; green "已添加并应用"; pause
         ;;
       3)
-        prompt "输入域名(逗号分隔): " s
-        [ -z "$s" ] && { red "不能为空"; pause; continue; }
-        [ -z "$V6_STRICT_SITES" ] && V6_STRICT_SITES="$s" || V6_STRICT_SITES="${V6_STRICT_SITES},${s}"
-        V6_STRICT_SITES="$(echo "$V6_STRICT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
-        save_outbound; apply_policy_all; green "已添加严格规则并应用"; pause
+        local all_json
+        all_json="$(csv_to_json_unique "$(merge_csv "$V6_COMPAT_SITES" "$V6_STRICT_SITES")")"
+        if [ "$(echo "$all_json" | jq 'length')" -eq 0 ]; then
+          red "规则为空"; pause; continue
+        fi
+        echo "当前IPv6规则："
+        echo "$all_json" | jq -r '.[]' | nl -w2 -s'. '
+        echo " 0. 取消"
+        prompt "输入序号: " idx
+        [[ "$idx" =~ ^[0-9]+$ ]] || { red "输入无效"; pause; continue; }
+        [ "$idx" -eq 0 ] && continue
+
+        local target
+        target="$(echo "$all_json" | jq -r ".[$((idx-1))] // empty")"
+        [ -z "$target" ] && { red "序号无效"; pause; continue; }
+
+        local cjson sjson
+        cjson="$(csv_to_json_unique "$V6_COMPAT_SITES")"
+        V6_COMPAT_SITES="$(echo "$cjson" | jq -r --arg t "$target" '[.[]|select(.!=$t)]|join(",")')"
+
+        sjson="$(csv_to_json_unique "$V6_STRICT_SITES")"
+        V6_STRICT_SITES="$(echo "$sjson" | jq -r --arg t "$target" '[.[]|select(.!=$t)]|join(",")')"
+
+        save_outbound; apply_policy_all
+        green "已删除并应用: $target"
+        pause
         ;;
-      4)
-        if [ -z "$V6_COMPAT_SITES" ]; then red "规则为空"; pause; continue; fi
-        local arr i=1
-        IFS=',' read -r -a arr <<< "$V6_COMPAT_SITES"
-        echo "当前兼容规则："
-        for d in "${arr[@]}"; do d="$(echo "$d" | sed 's/^ *//; s/ *$//')"; [ -z "$d" ] && continue; echo "  $i. $d"; i=$((i+1)); done
-        echo "  a. 全部删除"; echo "  0. 取消"
-        prompt "请输入序号或a: " idx
-        if [[ "$idx" =~ ^[aA]$ ]]; then V6_COMPAT_SITES=""; save_outbound; apply_policy_all; green "已全删并应用"; pause; continue; fi
-        if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -le 0 ] || [ "$idx" -ge "$i" ]; then [ "$idx" = "0" ] && continue; red "序号无效"; pause; continue; fi
-        local new="" j=1
-        for d in "${arr[@]}"; do
-          d="$(echo "$d" | sed 's/^ *//; s/ *$//')"; [ -z "$d" ] && continue
-          [ "$j" -ne "$idx" ] && { [ -z "$new" ] && new="$d" || new="${new},${d}"; }
-          j=$((j+1))
-        done
-        V6_COMPAT_SITES="$new"; save_outbound; apply_policy_all; green "已删除并应用"; pause
-        ;;
-      5)
-        if [ -z "$V6_STRICT_SITES" ]; then red "规则为空"; pause; continue; fi
-        local arr2 i2=1
-        IFS=',' read -r -a arr2 <<< "$V6_STRICT_SITES"
-        echo "当前严格规则："
-        for d in "${arr2[@]}"; do d="$(echo "$d" | sed 's/^ *//; s/ *$//')"; [ -z "$d" ] && continue; echo "  $i2. $d"; i2=$((i2+1)); done
-        echo "  a. 全部删除"; echo "  0. 取消"
-        prompt "请输入序号或a: " idx2
-        if [[ "$idx2" =~ ^[aA]$ ]]; then V6_STRICT_SITES=""; save_outbound; apply_policy_all; green "已全删并应用"; pause; continue; fi
-        if ! [[ "$idx2" =~ ^[0-9]+$ ]] || [ "$idx2" -le 0 ] || [ "$idx2" -ge "$i2" ]; then [ "$idx2" = "0" ] && continue; red "序号无效"; pause; continue; fi
-        local new2="" j2=1
-        for d in "${arr2[@]}"; do
-          d="$(echo "$d" | sed 's/^ *//; s/ *$//')"; [ -z "$d" ] && continue
-          [ "$j2" -ne "$idx2" ] && { [ -z "$new2" ] && new2="$d" || new2="${new2},${d}"; }
-          j2=$((j2+1))
-        done
-        V6_STRICT_SITES="$new2"; save_outbound; apply_policy_all; green "已删除并应用"; pause
-        ;;
-      6) apply_policy_all; pause ;;
+      4) apply_policy_all; pause ;;
       0) return ;;
       *) red "无效"; pause ;;
     esac
@@ -1691,7 +1882,7 @@ manage_outbound_menu(){
 xray_menu(){
   while true; do
     cls
-    local xs as
+    local xs as hs
     if [ -x "$XRAY_BIN" ]; then
       xs=$(is_running xray && echo "\033[1;36m运行中\033[0m" || echo "${C_BAD}未启动${C_RST}")
     else
@@ -1702,15 +1893,22 @@ xray_menu(){
     else
       as="${C_BAD}未配置${C_RST}"
     fi
+    if [ -f "$HY2_STATE" ]; then
+      hs="\033[1;36m已配置\033[0m"
+    else
+      hs="${C_BAD}未配置${C_RST}"
+    fi
 
     echo -e "${C_XRAY}=============== Xray管理 ===============${C_RST}"
-    echo -e "${C_XRAY}Xray${C_RST}: ${xs}     ${C_ARGO}Argo${C_RST}: ${as}"
+    echo -e "${C_XRAY}Xray${C_RST}: ${xs}   ${C_ARGO}Argo${C_RST}: ${as}   ${C_HY2}HY2${C_RST}: ${hs}"
     echo "-----------------------------------------------"
-    echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_ARGO}Argo${C_RST}              ${C_VIEW} 6.${C_RST} ${C_VIEW}查看${C_RST}${C_NODE}节点${C_RST}"
-    echo -e "${C_RESTART} 8.${C_RST} ${C_RESTART}重启${C_RST}${C_XRAY}Xray${C_RST}              ${C_MODIFY} 5.${C_RST} ${C_MODIFY}修改${C_RST}${C_UUID}UUID${C_RST}"
-    echo -e "${C_RESTART} 7.${C_RST} ${C_RESTART}重启${C_RST}${C_ARGO}Argo${C_RST}              ${C_MANAGE} 3.${C_RST} ${C_MANAGE}管理${C_RST}${C_SOCKS5}Socks5${C_RST}"
-    echo -e "${C_RESTART} 10.${C_RST} ${C_VIEW}实时${C_RST}${C_RESTART}日志${C_RST}${C_XRAY}(DEBUG)${C_RST}       ${C_MANAGE} 4.${C_RST} ${C_MANAGE}管理${C_RST}${C_FREEFLOW}免流${C_RST}"
-    echo -e "${C_BAD} 9.${C_RST} ${C_BAD}卸载${C_RST}${C_XRAY}Xray${C_RST}              ${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
+    echo -e "${C_INSTALL} 1.${C_RST} 安装Argo            ${C_VIEW} 6.${C_RST} 查看节点"
+    echo -e "${C_BAD} 2.${C_RST} 卸载Argo            ${C_MODIFY} 5.${C_RST} 修改UUID"
+    echo -e "${C_MANAGE} 3.${C_RST} 管理Socks5         ${C_RESTART} 7.${C_RST} 重启Argo"
+    echo -e "${C_MANAGE} 4.${C_RST} 管理免流           ${C_RESTART} 8.${C_RST} 重启Xray"
+    echo -e "${C_INSTALL} 11.${C_RST} 安装HY2           ${C_VIEW} 12.${C_RST} 查看HY2节点"
+    echo -e "${C_BAD} 13.${C_RST} 卸载HY2            ${C_VIEW} 10.${C_RST} 实时日志"
+    echo -e "${C_BAD} 9.${C_RST} 卸载Xray            ${C_BAD} 0.${C_RST} 返回"
     echo "==============================================="
     prompt "请选择: " c
     case "$c" in
@@ -1726,11 +1924,14 @@ xray_menu(){
         svc stop tunnel-argo; svc disable tunnel-argo
         rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service "${WORK}/argo_start.sh" "${WORK}/argo" "$ARGO_DOMAIN" "$ARGO_YML" "$ARGO_JSON"
         svc stop xray; svc disable xray
-        rm -f /etc/init.d/xray /etc/systemd/system/xray.service "$XRAY_BIN" "$XRAY_CONF" "$FREEFLOW_CONF"
+        rm -f /etc/init.d/xray /etc/systemd/system/xray.service "$XRAY_BIN" "$XRAY_CONF" "$FREEFLOW_CONF" "$HY2_STATE"
         command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
         green "Xray已卸载"; pause
         ;;
       10) foreground_xray_log ;;
+      11) install_hy2; pause ;;
+      12) show_hy2_node; pause ;;
+      13) uninstall_hy2; pause ;;
       0) return ;;
       *) red "无效"; pause ;;
     esac
@@ -1749,12 +1950,12 @@ sbox_menu(){
     echo -e "${C_SBOX}=============== Sbox管理 ===============${C_RST}"
     echo -e "Sbox: ${st}"
     echo "-----------------------------------------------"
-    echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_TUIC}Tuic${C_RST}"
-    echo -e "${C_VIEW} 2.${C_RST} ${C_VIEW}查看${C_RST}${C_NODE}节点${C_RST}"
-    echo -e "${C_RESTART} 3.${C_RST} ${C_RESTART}重启${C_RST}${C_TUIC}Tuic${C_RST}"
-    echo -e "${C_RESTART} 5.${C_RST} ${C_VIEW}实时${C_RST}${C_RESTART}日志${C_RST}(DEBUG)"
-    echo -e "${C_BAD} 4.${C_RST} ${C_BAD}卸载${C_RST}${C_TUIC}Tuic${C_RST}"
-    echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
+    echo -e "${C_INSTALL} 1.${C_RST} 安装Tuic"
+    echo -e "${C_VIEW} 2.${C_RST} 查看节点"
+    echo -e "${C_RESTART} 3.${C_RST} 重启Tuic"
+    echo -e "${C_VIEW} 5.${C_RST} 实时日志"
+    echo -e "${C_BAD} 4.${C_RST} 卸载Tuic"
+    echo -e "${C_BAD} 0.${C_RST} 返回"
     echo "==============================================="
     prompt "请选择: " c
     case "$c" in
@@ -1834,16 +2035,8 @@ main_menu(){
     info="$(sys_info)"
     mem="$(mem_used_disp)"
 
-    if [ -n "$WAN4" ]; then
-      u4="\033[1;36m${WAN4}  (${EMOJI4} ${COUNTRY4} ${ISP4})\033[0m"
-    else
-      u4="${C_BAD}未检出${C_RST}"
-    fi
-    if [ -n "$WAN6" ]; then
-      u6="\033[1;36m${WAN6}  (${EMOJI6} ${COUNTRY6} ${ISP6})\033[0m"
-    else
-      u6="${C_BAD}未检出${C_RST}"
-    fi
+    if [ -n "$WAN4" ]; then u4="\033[1;36m${WAN4}  (${EMOJI4} ${COUNTRY4} ${ISP4})\033[0m"; else u4="${C_BAD}未检出${C_RST}"; fi
+    if [ -n "$WAN6" ]; then u6="\033[1;36m${WAN6}  (${EMOJI6} ${COUNTRY6} ${ISP6})\033[0m"; else u6="${C_BAD}未检出${C_RST}"; fi
 
     echo -e "OS : \033[1;36m${info}\033[0m"
     echo -e "v4 : ${u4}"
