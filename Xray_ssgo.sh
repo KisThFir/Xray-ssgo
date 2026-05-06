@@ -1301,23 +1301,38 @@ foreground_sbox_log(){
   [ -x "$SB_BIN" ] || { red "sing-box 未安装"; pause; return 1; }
   [ -f "$SB_CONF" ] || { red "缺少配置: $SB_CONF"; pause; return 1; }
 
+  local bak="${SB_CONF}.bak.fg.$(date +%s)"
+  cp -a "$SB_CONF" "$bak"
+
+  # 临时改成 DEBUG（显示 sniff / route match 等细节）
+  if ! jq '.log.disabled=false | .log.level="debug" | .log.timestamp=true' \
+      "$SB_CONF" > "${SB_CONF}.tmp"; then
+    red "写入 DEBUG 日志配置失败"
+    rm -f "${SB_CONF}.tmp" "$bak"
+    pause
+    return 1
+  fi
+  mv "${SB_CONF}.tmp" "$SB_CONF"
+
   if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check_fg.log 2>&1; then
     red "配置校验失败，无法前台运行"
+    cp -f "$bak" "$SB_CONF"
+    rm -f "$bak"
     tail -n 80 /tmp/sb_check_fg.log 2>/dev/null || true
     pause
     return 1
   fi
 
-  yellow "即将停止 tuic-box 后台服务并前台输出日志..."
+  yellow "即将停止 tuic-box 后台服务并前台输出 DEBUG 日志..."
   svc stop tuic-box || true
   pkill -f "^${SB_BIN} run -c ${SB_CONF}$" >/dev/null 2>&1 || true
   pkill -x sing-box >/dev/null 2>&1 || true
   sleep 1
 
-  green "前台日志已启动（Ctrl+C 退出）"
+  green "前台 DEBUG 日志已启动（Ctrl+C 退出）"
   echo "日志文件: /tmp/sb-live.log"
 
-  # 关键：临时覆盖全局 INT trap，避免 Ctrl+C 直接退出整个管理脚本
+  # 临时覆盖全局 INT trap，避免 Ctrl+C 直接退出整个管理脚本
   local old_int_trap
   old_int_trap="$(trap -p INT || true)"
   trap ':' INT
@@ -1332,6 +1347,10 @@ foreground_sbox_log(){
   else
     trap - INT
   fi
+
+  # 恢复原配置（回到 info）
+  cp -f "$bak" "$SB_CONF"
+  rm -f "$bak"
 
   yellow "已退出前台日志，正在恢复后台服务..."
   svc start tuic-box || true
