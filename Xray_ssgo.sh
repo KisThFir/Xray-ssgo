@@ -1,31 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-C_RST="\033[0m"
-C_BASE="\033[1;36m"
-C_TITLE="$C_BASE"
-C_INFO="$C_BASE"
-C_OK="\033[1;32m"
-C_WARN="\033[1;33m"
-C_ERR="\033[1;91m"
-C_MUTED="\033[0;37m"
+C_RST=$'\033[0m'
+C_INFO=$'\033[1;36m'
+C_OK=$'\033[1;32m'
+C_WARN=$'\033[1;33m'
+C_BAD=$'\033[1;91m'
+C_PROMPT=$'\033[1;91m'
 
-C_BAD="\033[1;91m"
-C_PROMPT="\033[1;91m"
+C_XRAY=$'\033[1;96m'
+C_SBOX=$'\033[1;95m'
+C_OUTBOUND=$'\033[1;93m'
+C_RESTART=$'\033[1;94m'
+C_SWAP=$'\033[1;92m'
+C_SHORTCUT=$'\033[1;35m'
 
-C_XRAY_K="\033[1;96m"
-C_SBOX_K="\033[1;95m"
-C_OUTBOUND_K="\033[1;93m"
-C_RESTART_K="\033[1;94m"
-C_SWAP_K="\033[1;92m"
-C_SHORTCUT_K="\033[1;35m"
+C_ARGO=$'\033[1;35m'
+C_HY2=$'\033[1;36m'
 
-C_ARGO="\033[1;35m"
-C_HY2="\033[1;36m"
-
-red(){ printf '\033[1;91m%s\033[0m\n' "$1"; }
-green(){ printf '\033[1;32m%s\033[0m\n' "$1"; }
-yellow(){ printf '\033[1;33m%s\033[0m\n' "$1"; }
+red(){ printf '%b%s%b\n' "$C_BAD" "$1" "$C_RST"; }
+green(){ printf '%b%s%b\n' "$C_OK" "$1" "$C_RST"; }
+yellow(){ printf '%b%s%b\n' "$C_WARN" "$1" "$C_RST"; }
 purple(){ printf '\033[1;35m%s\033[0m\n' "$1"; }
 
 clear_buffer(){ while read -r -t 0.08 -n 10000 _d </dev/tty 2>/dev/null; do :; done; }
@@ -35,20 +30,17 @@ cls(){ clear; printf '\033[3J\033[2J\033[H'; }
 url_encode(){ jq -rn --arg x "$1" '$x|@uri'; }
 
 term_cols(){ tput cols 2>/dev/null || echo 80; }
-is_narrow(){ [ "$(term_cols)" -lt 86 ]; }
-
 hr(){
-  local n="${1:-64}" c="${2:-$C_TITLE}"
+  local n="${1:-62}" c="${2:-$C_INFO}"
   printf "%b" "$c"
   printf '%*s' "$n" '' | tr ' ' '─'
   printf "%b\n" "$C_RST"
 }
 title(){
-  local t="$1" c="${2:-$C_TITLE}"
+  local t="$1" c="${2:-$C_INFO}"
   cls
   printf "%b================ %s ================%b\n" "$c" "$t" "$C_RST"
 }
-
 clip_text(){
   local s="$1" max="${2:-72}"
   local len=${#s}
@@ -59,55 +51,63 @@ clip_text(){
   fi
 }
 
-paint_text(){
+label_colored(){
   local s="$1"
-  s="${s//Xray/${C_XRAY_K}Xray${C_BASE}}"
-  s="${s//Sbox/${C_SBOX_K}Sbox${C_BASE}}"
-  s="${s//出站/${C_OUTBOUND_K}出站${C_BASE}}"
-  s="${s//重启/${C_RESTART_K}重启${C_BASE}}"
-  s="${s//Swap/${C_SWAP_K}Swap${C_BASE}}"
-  s="${s//快捷/${C_SHORTCUT_K}快捷${C_BASE}}"
-  s="${s//返回/${C_BAD}返回${C_BASE}}"
-  s="${s//退出/${C_BAD}退出${C_BASE}}"
-  printf "%b%s%b" "$C_BASE" "$s" "$C_RST"
-}
+  case "$s" in
+    "管理Xray")       printf "管理%bXray%b" "$C_XRAY" "$C_RST" ;;
+    "管理Sbox")       printf "管理%bSbox%b" "$C_SBOX" "$C_RST" ;;
+    "管理出站")       printf "管理%b出站%b" "$C_OUTBOUND" "$C_RST" ;;
+    "定时重启")       printf "定时%b重启%b" "$C_RESTART" "$C_RST" ;;
+    "管理Swap")       printf "管理%bSwap%b" "$C_SWAP" "$C_RST" ;;
+    "创建快捷")       printf "创建%b快捷%b" "$C_SHORTCUT" "$C_RST" ;;
+    "彻底卸载")       printf "彻底卸载" ;;
+    "返回"|"退出")    printf "%b%s%b" "$C_BAD" "$s" "$C_RST" ;;
 
-menu_num_color(){
-  local num="$1"
-  case "$num" in
-    0|9) printf "%b" "$C_BAD" ;;
-    1) printf "%b" "$C_XRAY_K" ;;
-    2) printf "%b" "$C_SBOX_K" ;;
-    3) printf "%b" "$C_OUTBOUND_K" ;;
-    4) printf "%b" "$C_RESTART_K" ;;
-    5) printf "%b" "$C_SWAP_K" ;;
-    6) printf "%b" "$C_SHORTCUT_K" ;;
-    *) printf "%b" "$C_BASE" ;;
+    "安装Argo")       printf "安装%bArgo%b" "$C_ARGO" "$C_RST" ;;
+    "安装HY2")        printf "安装%bHY2%b" "$C_HY2" "$C_RST" ;;
+    "配置Socks5")     printf "配置Socks5" ;;
+    "配置免流")       printf "配置免流" ;;
+    "重启Xray与Argo") printf "%b重启%b%bXray%b与%bArgo%b" "$C_RESTART" "$C_RST" "$C_XRAY" "$C_RST" "$C_ARGO" "$C_RST" ;;
+    "卸载Xray")       printf "卸载%bXray%b" "$C_XRAY" "$C_RST" ;;
+    "查看节点")       printf "查看节点" ;;
+    "修改UUID")       printf "修改UUID" ;;
+    "实时日志")       printf "实时日志" ;;
+
+    "安装Tuic")       printf "安装Tuic" ;;
+    "重启Tuic")       printf "%b重启%bTuic" "$C_RESTART" "$C_RST" ;;
+    "卸载Tuic")       printf "卸载Tuic" ;;
+    *)                printf "%s" "$s" ;;
   esac
 }
-
+menu_num_color(){
+  local n="$1"
+  case "$n" in
+    0|9) printf "%b" "$C_BAD" ;;
+    *)   printf "%b" "$C_INFO" ;;
+  esac
+}
 render_two_col_menu(){
   local colw row
   colw=$(( ($(term_cols)-6)/2 ))
-  [ "$colw" -lt 26 ] && colw=26
+  [ "$colw" -lt 24 ] && colw=24
 
   for row in "$@"; do
     IFS='|' read -r lnum ltxt rnum rtxt <<< "$row"
 
-    local lnumc rnumc llabel rlabel lcell rcell
-    lnumc="$(menu_num_color "$lnum")"
-    llabel="$(paint_text "$ltxt")"
-    lcell="$(printf '%b%2s.%b %s' "$lnumc" "$lnum" "$C_RST" "$llabel")"
+    local lnc rnc ll rr left right
+    lnc="$(menu_num_color "$lnum")"
+    ll="$(label_colored "$ltxt")"
+    left="$(printf '%b%2s.%b %s' "$lnc" "$lnum" "$C_RST" "$ll")"
 
     if [ -n "${rnum:-}" ]; then
-      rnumc="$(menu_num_color "$rnum")"
-      rlabel="$(paint_text "$rtxt")"
-      rcell="$(printf '%b%2s.%b %s' "$rnumc" "$rnum" "$C_RST" "$rlabel")"
+      rnc="$(menu_num_color "$rnum")"
+      rr="$(label_colored "$rtxt")"
+      right="$(printf '%b%2s.%b %s' "$rnc" "$rnum" "$C_RST" "$rr")"
     else
-      rcell=""
+      right=""
     fi
 
-    printf "%-${colw}s  %s\n" "$lcell" "$rcell"
+    printf "%-${colw}s  %s\n" "$left" "$right"
   done
 }
 
@@ -162,7 +162,6 @@ BASE_REGION="Node"
 BASE_FULL="Node"
 
 is_alpine(){ [ -f /etc/alpine-release ]; }
-
 service_exists(){
   local s="$1"
   if is_alpine; then
@@ -196,7 +195,6 @@ is_running(){
 }
 
 need_cmd(){ command -v "$1" >/dev/null 2>&1; }
-
 pkg_install(){
   local p
   for p in "$@"; do
@@ -212,7 +210,6 @@ pkg_install(){
     fi
   done
 }
-
 ensure_deps(){
   need_cmd jq || pkg_install jq
   need_cmd wget || pkg_install wget
@@ -223,7 +220,6 @@ ensure_deps(){
   need_cmd unzip || pkg_install unzip
   need_cmd openssl || pkg_install openssl
   [ -f /etc/alpine-release ] && pkg_install ca-certificates || true
-
   for c in jq wget curl ip base64 tar unzip openssl; do
     command -v "$c" >/dev/null 2>&1 || { red "依赖缺失:$c"; return 1; }
   done
@@ -253,30 +249,19 @@ detect_cloudflared_arch(){
 }
 detect_singbox_suffix(){
   case "$(uname -m)" in
-    x86_64|amd64)
-      if is_alpine; then echo "-linux-amd64-musl"; else echo "-linux-amd64"; fi
-      ;;
-    aarch64|arm64)
-      if is_alpine; then echo "-linux-arm64-musl"; else echo "-linux-arm64"; fi
-      ;;
-    *)
-      echo ""
-      ;;
+    x86_64|amd64) if is_alpine; then echo "-linux-amd64-musl"; else echo "-linux-amd64"; fi ;;
+    aarch64|arm64) if is_alpine; then echo "-linux-arm64-musl"; else echo "-linux-arm64"; fi ;;
+    *) echo "" ;;
   esac
 }
 normalize_path(){ [ -z "${1:-}" ] && echo "/" || { case "$1" in /*) echo "$1" ;; *) echo "/$1" ;; esac; }; }
 gen_uuid(){ cat /proc/sys/kernel/random/uuid; }
 
 smart_download(){
-  local out="$1" url="$2" min="$3"
-  local t=0
+  local out="$1" url="$2" min="$3" t=0
   while [ "$t" -lt 3 ]; do
     rm -f "$out"
-
-    if command -v curl >/dev/null 2>&1; then
-      curl -L --connect-timeout 10 --max-time 120 -o "$out" "$url" >/dev/null 2>&1 || true
-    fi
-
+    command -v curl >/dev/null 2>&1 && curl -L --connect-timeout 10 --max-time 120 -o "$out" "$url" >/dev/null 2>&1 || true
     if [ ! -s "$out" ] && command -v wget >/dev/null 2>&1; then
       if wget --help 2>&1 | grep -q -- '--show-progress'; then
         wget -q --show-progress --timeout=30 --tries=1 -O "$out" "$url" || true
@@ -284,24 +269,17 @@ smart_download(){
         wget -q -T 30 -O "$out" "$url" || true
       fi
     fi
-
     if [ -f "$out" ]; then
-      local sz
-      sz=$(wc -c < "$out" 2>/dev/null || echo 0)
+      local sz; sz=$(wc -c < "$out" 2>/dev/null || echo 0)
       [ "${sz:-0}" -ge "$min" ] && return 0
     fi
-
-    t=$((t+1))
-    sleep 2
+    t=$((t+1)); sleep 2
   done
   return 1
 }
-
 update_xray(){
   if ! jq "$@" "$XRAY_CONF" > "${XRAY_CONF}.tmp"; then
-    rm -f "${XRAY_CONF}.tmp"
-    red "配置更新失败"
-    return 1
+    rm -f "${XRAY_CONF}.tmp"; red "配置更新失败"; return 1
   fi
   mv "${XRAY_CONF}.tmp" "$XRAY_CONF"
 }
@@ -336,24 +314,11 @@ save_outbound(){
 normalize_country_code(){
   local c="$(echo "${1:-}" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   local cu="$(echo "$c" | tr '[:lower:]' '[:upper:]')"
-
-  if [ ${#cu} -eq 2 ] && echo "$cu" | grep -Eq '^[A-Z]{2}$'; then
-    echo "$cu"; return
-  fi
-
+  if [ ${#cu} -eq 2 ] && echo "$cu" | grep -Eq '^[A-Z]{2}$'; then echo "$cu"; return; fi
   case "$c" in
-    新加坡) echo "SG" ;;
-    日本) echo "JP" ;;
-    香港) echo "HK" ;;
-    台湾) echo "TW" ;;
-    美国) echo "US" ;;
-    英国) echo "GB" ;;
-    德国) echo "DE" ;;
-    法国) echo "FR" ;;
-    韩国) echo "KR" ;;
-    马来西亚) echo "MY" ;;
-    印度) echo "IN" ;;
-    俄罗斯) echo "RU" ;;
+    新加坡) echo "SG" ;; 日本) echo "JP" ;; 香港) echo "HK" ;; 台湾) echo "TW" ;;
+    美国) echo "US" ;; 英国) echo "GB" ;; 德国) echo "DE" ;; 法国) echo "FR" ;;
+    韩国) echo "KR" ;; 马来西亚) echo "MY" ;; 印度) echo "IN" ;; 俄罗斯) echo "RU" ;;
     *) echo "$cu" ;;
   esac
 }
@@ -388,16 +353,8 @@ load_ip_cache(){
 }
 apply_base_name(){
   local cc isp
-  if [ -n "$COUNTRY4" ] || [ -n "$ISP4" ]; then
-    cc="${COUNTRY4^^}"; isp="$ISP4"
-  else
-    cc="${COUNTRY6^^}"; isp="$ISP6"
-  fi
-  if [ -n "$cc" ]; then
-    BASE_REGION="${cc}"
-  else
-    BASE_REGION="Node"
-  fi
+  if [ -n "$COUNTRY4" ] || [ -n "$ISP4" ]; then cc="${COUNTRY4^^}"; isp="$ISP4"; else cc="${COUNTRY6^^}"; isp="$ISP6"; fi
+  [ -n "$cc" ] && BASE_REGION="$cc" || BASE_REGION="Node"
   [ -n "$isp" ] && BASE_FULL="${BASE_REGION} ${isp}" || BASE_FULL="$BASE_REGION"
 }
 
@@ -421,51 +378,33 @@ platform_get_realip() {
   _G_CACHED_REALIP="${_res}"
   printf '%s' "${_G_CACHED_REALIP}"
 }
-
 fill_by_ipinfo_ip(){
-  local fam="$1" ip="$2"
+  local fam="$1" ip="$2" j cc org
   [ -z "$ip" ] && return 1
-  local j cc org
   j="$(curl -sf --max-time 6 "https://ipinfo.io/${ip}/json" 2>/dev/null || true)"
   if [ -z "$j" ] || ! echo "$j" | jq -e '.ip' >/dev/null 2>&1; then
     org="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/org" 2>/dev/null || true)"
     cc="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/country" 2>/dev/null || true)"
     cc="$(normalize_country_code "$cc")"
-    if [ "$fam" = "4" ]; then
-      WAN4="$ip"; COUNTRY4="$cc"; ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
-    else
-      WAN6="$ip"; COUNTRY6="$cc"; ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
-    fi
+    if [ "$fam" = "4" ]; then WAN4="$ip"; COUNTRY4="$cc"; ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
+    else WAN6="$ip"; COUNTRY6="$cc"; ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"; fi
     return 0
   fi
-
-  cc="$(echo "$j" | jq -r '.country // empty' 2>/dev/null || true)"
-  cc="$(normalize_country_code "$cc")"
+  cc="$(echo "$j" | jq -r '.country // empty' 2>/dev/null || true)"; cc="$(normalize_country_code "$cc")"
   org="$(echo "$j" | jq -r '.org // empty' 2>/dev/null || true)"
-  if [ "$fam" = "4" ]; then
-    WAN4="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
-    COUNTRY4="$cc"
-    ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
-  else
-    WAN6="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
-    COUNTRY6="$cc"
-    ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
-  fi
+  if [ "$fam" = "4" ]; then WAN4="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"; COUNTRY4="$cc"; ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
+  else WAN6="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"; COUNTRY6="$cc"; ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"; fi
 }
-
 parse_cf_json(){
-  local fam="$1" j="$2"
+  local fam="$1" j="$2" ip cc asn isp
   [ -z "$j" ] && return 1
   echo "$j" | jq -e '.ip' >/dev/null 2>&1 || return 1
-
-  local ip cc asn isp
   ip="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
   cc="$(echo "$j" | jq -r '.country // empty' 2>/dev/null || true)"
   cc="$(normalize_country_code "$cc")"
   asn="$(echo "$j" | jq -r '.asn // empty' 2>/dev/null || true)"
   isp="$(echo "$j" | jq -r '.isp // empty' 2>/dev/null || true)"
   [ -z "$ip" ] && return 1
-
   if [ "$fam" = "4" ]; then
     WAN4="$ip"; COUNTRY4="$cc"
     ISP4="$(clean_isp "${asn:+AS${asn} }${isp}")"; [ -z "$ISP4" ] && ISP4="$(clean_isp "$isp")"; [ -z "$ISP4" ] && ISP4="unknown"
@@ -475,20 +414,15 @@ parse_cf_json(){
   fi
   return 0
 }
-
 get_local_ipv6_fallback(){
   local ip6=""
   ip6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
   [ -z "$ip6" ] && ip6="$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | grep -v '^fe80:' | head -n1 || true)"
   echo "$ip6"
 }
-
 check_ip(){
   [ "${IP_CHECKED:-0}" = "1" ] && return 0
-
-  WAN4=""; WAN6=""
-  COUNTRY4=""; COUNTRY6=""
-  ISP4=""; ISP6=""
+  WAN4=""; WAN6=""; COUNTRY4=""; COUNTRY6=""; ISP4=""; ISP6=""
 
   local IF4="" L4=""
   IF4="$(ip -4 route show default 2>/dev/null | awk '/default/ {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)"
@@ -498,41 +432,24 @@ check_ip(){
   fi
 
   local j4=""
-  if [ -n "${L4:-}" ]; then
-    j4="$(curl -4 -sk --interface "$L4" --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
-  else
-    j4="$(curl -4 -sk --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
-  fi
+  if [ -n "${L4:-}" ]; then j4="$(curl -4 -sk --interface "$L4" --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
+  else j4="$(curl -4 -sk --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"; fi
   parse_cf_json 4 "$j4" || true
 
   if [ -z "${WAN4:-}" ]; then
-    local ip4=""
-    ip4="$(curl -4 -sf --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    local ip4=""; ip4="$(curl -4 -sf --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     [ -n "$ip4" ] && fill_by_ipinfo_ip 4 "$ip4" || true
   fi
 
-  local ip6=""
-  ip6="$(curl -6 -sf --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
-  if [ -n "$ip6" ]; then
-    WAN6="$ip6"
-    fill_by_ipinfo_ip 6 "$WAN6" || true
-  else
-    ip6="$(get_local_ipv6_fallback || true)"
-    if [ -n "$ip6" ]; then
-      WAN6="$ip6"
-      fill_by_ipinfo_ip 6 "$WAN6" || true
-    fi
-  fi
+  local ip6=""; ip6="$(curl -6 -sf --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
+  if [ -n "$ip6" ]; then WAN6="$ip6"; fill_by_ipinfo_ip 6 "$WAN6" || true
+  else ip6="$(get_local_ipv6_fallback || true)"; [ -n "$ip6" ] && WAN6="$ip6" && fill_by_ipinfo_ip 6 "$WAN6" || true; fi
 
   if [ -z "${WAN4:-}" ] && [ -z "${WAN6:-}" ]; then
-    local rip=""
-    rip="$(platform_get_realip 2>/dev/null || true)"
+    local rip=""; rip="$(platform_get_realip 2>/dev/null || true)"
     if [ -n "$rip" ]; then
-      if [[ "$rip" == *:* ]]; then
-        WAN6="$rip"; fill_by_ipinfo_ip 6 "$WAN6" || true
-      else
-        WAN4="$rip"; fill_by_ipinfo_ip 4 "$WAN4" || true
-      fi
+      if [[ "$rip" == *:* ]]; then WAN6="$rip"; fill_by_ipinfo_ip 6 "$WAN6" || true
+      else WAN4="$rip"; fill_by_ipinfo_ip 4 "$WAN4" || true; fi
     fi
   fi
 
@@ -544,47 +461,21 @@ check_ip(){
 
 normalize_domain_item(){
   local s="$1"
-  s="${s#http://}"; s="${s#https://}"
-  s="${s%%/*}"; s="${s%%:*}"
+  s="${s#http://}"; s="${s#https://}"; s="${s%%/*}"; s="${s%%:*}"
   s="$(echo "$s" | tr '[:upper:]' '[:lower:]' | sed 's/^ *//;s/ *$//;s/^\.*//')"
   echo "$s"
 }
-merge_csv(){
-  local a="$1" b="$2"
-  if [ -z "$a" ]; then echo "$b"; return; fi
-  if [ -z "$b" ]; then echo "$a"; return; fi
-  echo "${a},${b}"
-}
+merge_csv(){ local a="$1" b="$2"; [ -z "$a" ] && { echo "$b"; return; }; [ -z "$b" ] && { echo "$a"; return; }; echo "${a},${b}"; }
 csv_to_json_unique(){
-  local d="$1"
-  local raw_arr=() clean_arr=() item
+  local d="$1" raw_arr=() clean_arr=() item
   IFS=',' read -r -a raw_arr <<< "$d"
-  for item in "${raw_arr[@]}"; do
-    item="$(normalize_domain_item "$item")"
-    [ -z "$item" ] && continue
-    clean_arr+=("$item")
-  done
+  for item in "${raw_arr[@]}"; do item="$(normalize_domain_item "$item")"; [ -z "$item" ] && continue; clean_arr+=("$item"); done
   printf '%s\n' "${clean_arr[@]}" | awk 'NF' | sort -u | jq -Rsc 'split("\n")|map(select(length>0))'
 }
 yt_domains_csv(){ echo "youtube.com,youtu.be,googlevideo.com,ytimg.com"; }
-build_v6_compat_domains_json(){
-  local d="$V6_COMPAT_SITES"
-  [ "$YOUTUBE_MODE" = "1" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
-  csv_to_json_unique "$d"
-}
-build_v6_strict_domains_json(){
-  local d="$V6_STRICT_SITES"
-  [ "$YOUTUBE_MODE" = "2" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
-  csv_to_json_unique "$d"
-}
-yt_mode_str(){
-  case "$YOUTUBE_MODE" in
-    0) echo "关闭" ;;
-    1) echo "兼容" ;;
-    2) echo "严格" ;;
-    *) echo "关闭" ;;
-  esac
-}
+build_v6_compat_domains_json(){ local d="$V6_COMPAT_SITES"; [ "$YOUTUBE_MODE" = "1" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"; csv_to_json_unique "$d"; }
+build_v6_strict_domains_json(){ local d="$V6_STRICT_SITES"; [ "$YOUTUBE_MODE" = "2" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"; csv_to_json_unique "$d"; }
+yt_mode_str(){ case "$YOUTUBE_MODE" in 0) echo "关闭" ;; 1) echo "兼容" ;; 2) echo "严格" ;; *) echo "关闭" ;; esac; }
 
 init_xray_conf(){
   mkdir -p "$WORK"
@@ -619,8 +510,7 @@ EOF
 }
 ensure_dns_rule(){
   init_xray_conf
-  local has_dnsout
-  has_dnsout=$(jq '[.outbounds[]?.tag] | contains(["dns-out"])' "$XRAY_CONF" 2>/dev/null || echo false)
+  local has_dnsout; has_dnsout=$(jq '[.outbounds[]?.tag] | contains(["dns-out"])' "$XRAY_CONF" 2>/dev/null || echo false)
   [ "$has_dnsout" = "true" ] || update_xray '.outbounds += [{"protocol":"dns","tag":"dns-out"}]'
   jq -e '.routing' "$XRAY_CONF" >/dev/null 2>&1 || update_xray '.routing={"rules":[]}'
   update_xray 'del(.routing.rules[]? | select(.port=="53" or .protocol=="dns"))'
@@ -628,8 +518,7 @@ ensure_dns_rule(){
 }
 xray_uuid(){
   if [ -f "$XRAY_CONF" ]; then
-    local u
-    u=$(jq -r '(first(.inbounds[]? | select(.protocol=="vless") | .settings.clients[0].id) // empty)' "$XRAY_CONF" 2>/dev/null || true)
+    local u; u=$(jq -r '(first(.inbounds[]? | select(.protocol=="vless") | .settings.clients[0].id) // empty)' "$XRAY_CONF" 2>/dev/null || true)
     [ -n "$u" ] && { echo "$u"; return; }
   fi
   echo "$UUID_FALLBACK"
@@ -646,7 +535,6 @@ install_xray(){
   mkdir -p "$WORK"
   init_xray_conf
   ensure_dns_rule
-
   if [ ! -x "$XRAY_BIN" ]; then
     local arch url
     arch="$(detect_xray_arch)"
@@ -657,7 +545,6 @@ install_xray(){
     chmod +x "$XRAY_BIN"
     rm -f "${WORK}/xray.zip" "${WORK}/geosite.dat" "${WORK}/geoip.dat" "${WORK}/README.md" "${WORK}/LICENSE"
   fi
-
   if ! service_exists xray; then
     if is_alpine; then
       cat > /etc/init.d/xray <<EOF
@@ -690,7 +577,6 @@ EOF
 apply_policy_xray(){
   [ -f "$XRAY_CONF" ] || return 0
   ensure_dns_rule
-
   update_xray '
     .outbounds |= (
       map(select(.tag!="direct" and .tag!="direct-v4" and .tag!="direct-v6" and .tag!="block-v4"))
@@ -698,7 +584,6 @@ apply_policy_xray(){
       + [{"protocol":"freedom","tag":"direct-v6","settings":{"domainStrategy":"UseIPv6"}}]
       + [{"protocol":"blackhole","tag":"block-v4"}]
     )'
-
   update_xray 'del(.routing.rules[]? | select(.tag=="v6-compat-rule" or .tag=="v6-strict-route-rule" or .tag=="v6-strict-reject-rule"))'
 
   local compat strict
@@ -706,21 +591,15 @@ apply_policy_xray(){
   strict="$(build_v6_strict_domains_json)"
 
   if [ "$(echo "$strict" | jq 'length')" -gt 0 ]; then
-    update_xray --argjson d "$strict" \
-      '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"ip":["0.0.0.0/0"],"outboundTag":"block-v4","tag":"v6-strict-reject-rule"}]'
-    update_xray --argjson d "$strict" \
-      '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-strict-route-rule"}]'
+    update_xray --argjson d "$strict" '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"ip":["0.0.0.0/0"],"outboundTag":"block-v4","tag":"v6-strict-reject-rule"}]'
+    update_xray --argjson d "$strict" '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-strict-route-rule"}]'
   fi
-
   if [ "$(echo "$compat" | jq 'length')" -gt 0 ]; then
-    update_xray --argjson d "$compat" \
-      '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-compat-rule"}]'
+    update_xray --argjson d "$compat" '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-compat-rule"}]'
   fi
 }
-
 apply_policy_sbox(){
   [ -f "$SB_CONF" ] || return 0
-
   local compat strict
   compat="$(build_v6_compat_domains_json)"
   strict="$(build_v6_strict_domains_json)"
@@ -728,40 +607,21 @@ apply_policy_sbox(){
   jq '
     .outbounds |= (
       map(select(.tag!="direct_ipv4" and .tag!="direct_ipv6"))
-      + [{
-          "type":"direct",
-          "tag":"direct_ipv4",
-          "domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}
-        }]
-      + [{
-          "type":"direct",
-          "tag":"direct_ipv6",
-          "domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}
-        }]
-    )
-  ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
+      + [{"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}}]
+      + [{"type":"direct","tag":"direct_ipv6","domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}}]
+    )' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
 
   jq --argjson c "$compat" --argjson s "$strict" '
     .dns = (.dns // {})
-    | .dns.rules = (
-        (if ($s|length)>0 then [{"domain_suffix":$s,"server":"dns_cf"}] else [] end)
-        + (if ($c|length)>0 then [{"domain_suffix":$c,"server":"dns_cf"}] else [] end)
-      )
+    | .dns.rules = ((if ($s|length)>0 then [{"domain_suffix":$s,"server":"dns_cf"}] else [] end)+(if ($c|length)>0 then [{"domain_suffix":$c,"server":"dns_cf"}] else [] end))
     | .route = (.route // {})
-    | .route.rules = (
-        [{"action":"sniff"}]
-        + (if ($s|length)>0 then [{"domain_suffix":$s,"ip_version":4,"action":"reject","method":"default"}] else [] end)
-        + (if ($s|length)>0 then [{"domain_suffix":$s,"action":"route","outbound":"direct_ipv6"}] else [] end)
-        + (if ($c|length)>0 then [{"domain_suffix":$c,"action":"route","outbound":"direct_ipv6"}] else [] end)
-      )
+    | .route.rules = ([{"action":"sniff"}]+(if ($s|length)>0 then [{"domain_suffix":$s,"ip_version":4,"action":"reject","method":"default"}] else [] end)+(if ($s|length)>0 then [{"domain_suffix":$s,"action":"route","outbound":"direct_ipv6"}] else [] end)+(if ($c|length)>0 then [{"domain_suffix":$c,"action":"route","outbound":"direct_ipv6"}] else [] end))
     | .route.final = "direct_ipv4"
   ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
 }
-
 apply_policy_all(){
   apply_policy_xray || true
   apply_policy_sbox || true
-
   if [ -x "$SB_BIN" ] && [ -f "$SB_CONF" ]; then
     if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check_apply.log 2>&1; then
       red "sing-box配置校验失败，已跳过重启tuic-box"
@@ -770,7 +630,6 @@ apply_policy_all(){
       service_exists tuic-box && svc restart tuic-box
     fi
   fi
-
   service_exists xray && svc restart xray
   green "出站规则已应用(Xray+Sbox)"
 }
@@ -829,8 +688,7 @@ EOF
 
   local ws xh ss
   ws='{"port":8080,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":"'"${uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/argo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
-  xh=$(jq -nc --arg uuid "$uuid" --arg mode "$XHTTP_MODE" --argjson extra "$XHTTP_EXTRA_JSON" \
-      '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}')
+  xh=$(jq -nc --arg uuid "$uuid" --arg mode "$XHTTP_MODE" --argjson extra "$XHTTP_EXTRA_JSON" '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}')
   ss='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'"${ss_method}"'","password":"'"${ss_pass}"'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
   update_xray --argjson ws "$ws" --argjson xh "$xh" --argjson ss "$ss" '.inbounds += [$ws,$xh,$ss]'
 
@@ -873,14 +731,10 @@ EOF
   green "Argo配置完成"
 }
 uninstall_argo(){
-  svc stop tunnel-argo
-  svc disable tunnel-argo
+  svc stop tunnel-argo; svc disable tunnel-argo
   rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service "${WORK}/argo_start.sh" "${WORK}/argo"
   rm -f "$ARGO_DOMAIN" "$ARGO_YML" "$ARGO_JSON"
-  if [ -f "$XRAY_CONF" ]; then
-    update_xray 'del(.inbounds[]? | select(.port==8080 or .port==8081 or .port==8082))'
-    svc restart xray
-  fi
+  if [ -f "$XRAY_CONF" ]; then update_xray 'del(.inbounds[]? | select(.port==8080 or .port==8081 or .port==8082))'; svc restart xray; fi
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
   green "Argo已卸载"
 }
@@ -888,34 +742,21 @@ uninstall_argo(){
 write_hy2_state(){
   local port="$1" domain="$2" pass="$3" up="$4" down="$5" obfs="$6"
   mkdir -p "$WORK"
-  {
-    echo "PORT=$port"
-    echo "DOMAIN=$domain"
-    echo "PASS=$pass"
-    echo "UP=$up"
-    echo "DOWN=$down"
-    echo "OBFS=$obfs"
-  } > "$HY2_STATE"
+  { echo "PORT=$port"; echo "DOMAIN=$domain"; echo "PASS=$pass"; echo "UP=$up"; echo "DOWN=$down"; echo "OBFS=$obfs"; } > "$HY2_STATE"
 }
 install_hy2(){
   install_xray || return 1
   ensure_dns_rule || return 1
 
   local domain token port pass obfs prof up down
-  prompt "HY2域名:" domain
-  [ -z "$domain" ] && { red "域名不能为空"; return 1; }
-  prompt "CloudflareAPIToken:" token
-  [ -z "$token" ] && { red "Token不能为空"; return 1; }
+  prompt "HY2域名:" domain; [ -z "$domain" ] && { red "域名不能为空"; return 1; }
+  prompt "CloudflareAPIToken:" token; [ -z "$token" ] && { red "Token不能为空"; return 1; }
 
-  prompt "HY2端口(默认24443):" port
-  [ -z "$port" ] && port=24443
+  prompt "HY2端口(默认24443):" port; [ -z "$port" ] && port=24443
   [[ "$port" =~ ^[0-9]+$ ]] || { red "端口无效"; return 1; }
 
-  prompt "HY2密码(回车随机UUID):" pass
-  [ -z "$pass" ] && pass="$(gen_uuid)"
-
-  prompt "HY2混淆密码(回车随机UUID):" obfs
-  [ -z "$obfs" ] && obfs="$(gen_uuid)"
+  prompt "HY2密码(回车随机UUID):" pass; [ -z "$pass" ] && pass="$(gen_uuid)"
+  prompt "HY2混淆密码(回车随机UUID):" obfs; [ -z "$obfs" ] && obfs="$(gen_uuid)"
 
   echo "带宽档位:1.温和(50/100) 2.均衡(100/200) 3.激进(200/500) 4.自定义"
   prompt "选择(默认1):" prof
@@ -925,8 +766,7 @@ install_hy2(){
     4)
       prompt "上行Mbps(默认100):" up
       prompt "下行Mbps(默认200):" down
-      [ -z "$up" ] && up=100
-      [ -z "$down" ] && down=200
+      [ -z "$up" ] && up=100; [ -z "$down" ] && down=200
       [[ "$up" =~ ^[0-9]+$ ]] || up=100
       [[ "$down" =~ ^[0-9]+$ ]] || down=200
       ;;
@@ -939,42 +779,22 @@ install_hy2(){
   update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or (.protocol=="hysteria2" and .port==24443)))'
 
   local hy2
-  hy2="$(jq -nc \
-    --argjson p "$port" \
-    --arg pass "$pass" \
-    --arg obfs "$obfs" \
-    --arg domain "$domain" \
-    --arg up "${up} mbps" \
-    --arg down "${down} mbps" \
-    --arg crt "${TLS_DIR}/${domain}.crt" \
-    --arg key "${TLS_DIR}/${domain}.key" \
-'{
+  hy2="$(jq -nc --argjson p "$port" --arg pass "$pass" --arg obfs "$obfs" --arg domain "$domain" --arg up "${up} mbps" --arg down "${down} mbps" --arg crt "${TLS_DIR}/${domain}.crt" --arg key "${TLS_DIR}/${domain}.key" '{
   "tag":"hy2-in",
   "listen":"::",
   "port":$p,
   "protocol":"hysteria2",
-  "settings":{
-    "password":$pass,
-    "obfs":{"type":"salamander","password":$obfs}
-  },
+  "settings":{"password":$pass,"obfs":{"type":"salamander","password":$obfs}},
   "streamSettings":{
     "network":"hy2",
-    "hy2Settings":{
-      "upMbps":($up|split(" ")[0]|tonumber),
-      "downMbps":($down|split(" ")[0]|tonumber)
-    },
+    "hy2Settings":{"upMbps":($up|split(" ")[0]|tonumber),"downMbps":($down|split(" ")[0]|tonumber)},
     "security":"tls",
-    "tlsSettings":{
-      "alpn":["h3"],
-      "certificates":[{"certificateFile":$crt,"keyFile":$key}],
-      "serverName":$domain
-    }
+    "tlsSettings":{"alpn":["h3"],"certificates":[{"certificateFile":$crt,"keyFile":$key}],"serverName":$domain}
   },
   "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}
 }')"
 
   update_xray --argjson ib "$hy2" '.inbounds += [$ib]'
-
   svc restart xray
   write_hy2_state "$port" "$domain" "$pass" "$up" "$down" "$obfs"
   green "HY2安装成功(Xray)"
@@ -999,23 +819,17 @@ show_xray_nodes(){
   [ -z "$BASE_FULL" ] && BASE_FULL="Node"
 
   green "===============Xray相关节点==============="
-
   if [ -f "$ARGO_DOMAIN" ]; then
     local d xextra nx nw ns
-    d="$(cat "$ARGO_DOMAIN")"
-    xextra="$(url_encode "$XHTTP_EXTRA_JSON")"
-    nx="${BASE_FULL}-ArgoXHTTP"
-    nw="${BASE_FULL}-ArgoWS"
-    ns="${BASE_FULL}-ArgoSS"
+    d="$(cat "$ARGO_DOMAIN")"; xextra="$(url_encode "$XHTTP_EXTRA_JSON")"
+    nx="${BASE_FULL}-ArgoXHTTP"; nw="${BASE_FULL}-ArgoWS"; ns="${BASE_FULL}-ArgoSS"
     purple "vless://${uuid}@${CFIP}:443?encryption=none&security=tls&sni=${d}&alpn=h2&fp=chrome&type=xhttp&host=${d}&path=%2Fxgo&mode=${XHTTP_MODE}&extra=${xextra}#$(url_encode "$nx")"; echo
     purple "vless://${uuid}@${CFIP}:443?encryption=none&security=tls&sni=${d}&fp=chrome&type=ws&host=${d}&path=%2Fargo%3Fed%3D2560#$(url_encode "$nw")"; echo
     cnt=$((cnt+2))
-    local ssib
-    ssib="$(jq -c '.inbounds[]? | select(.protocol=="shadowsocks" and .port==8082)' "$XRAY_CONF" 2>/dev/null || true)"
+    local ssib; ssib="$(jq -c '.inbounds[]? | select(.protocol=="shadowsocks" and .port==8082)' "$XRAY_CONF" 2>/dev/null || true)"
     if [ -n "$ssib" ]; then
       local m pw b64
-      m="$(echo "$ssib" | jq -r '.settings.method')"
-      pw="$(echo "$ssib" | jq -r '.settings.password')"
+      m="$(echo "$ssib" | jq -r '.settings.method')"; pw="$(echo "$ssib" | jq -r '.settings.password')"
       b64="$(echo -n "${m}:${pw}" | base64 | tr -d '\n')"
       purple "ss://${b64}@${SS_FIXED_IP}:80?type=ws&security=none&host=${d}&path=%2Fssgo#$(url_encode "$ns")"; echo
       cnt=$((cnt+1))
@@ -1023,28 +837,22 @@ show_xray_nodes(){
   fi
 
   if [ -f "$FREEFLOW_CONF" ]; then
-    local f1 f2
-    f1="$(sed -n '1p' "$FREEFLOW_CONF" 2>/dev/null || true)"
-    f2="$(sed -n '2p' "$FREEFLOW_CONF" 2>/dev/null || true)"
+    local f1 f2; f1="$(sed -n '1p' "$FREEFLOW_CONF" 2>/dev/null || true)"; f2="$(sed -n '2p' "$FREEFLOW_CONF" 2>/dev/null || true)"
     [ -z "$f2" ] && f2="/"
     if [[ "$f1" =~ ^(ws|httpupgrade)$ ]] && [ -n "$ip" ]; then
-      local nm mode
-      mode="${f1^^}"; [ "$mode" = "HTTPUPGRADE" ] && mode="HTTP+"
+      local nm mode; mode="${f1^^}"; [ "$mode" = "HTTPUPGRADE" ] && mode="HTTP+"
       nm="${BASE_FULL}-${mode}"
       purple "vless://${uuid}@${ip}:80?encryption=none&security=none&type=${f1}&host=${ip}&path=$(url_encode "$f2")#$(url_encode "$nm")"; echo
       cnt=$((cnt+1))
     fi
   fi
 
-  local sl
-  sl="$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$XRAY_CONF" 2>/dev/null || true)"
+  local sl; sl="$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$XRAY_CONF" 2>/dev/null || true)"
   if [ -n "$sl" ] && [ -n "$ip" ]; then
     while read -r line; do
       [ -z "$line" ] && continue
       local p u pw n
-      p="$(echo "$line" | jq -r '.port')"
-      u="$(echo "$line" | jq -r '.settings.accounts[0].user')"
-      pw="$(echo "$line" | jq -r '.settings.accounts[0].pass')"
+      p="$(echo "$line" | jq -r '.port')"; u="$(echo "$line" | jq -r '.settings.accounts[0].user')"; pw="$(echo "$line" | jq -r '.settings.accounts[0].pass')"
       n="${BASE_FULL}-Socks5-${p}"
       purple "socks5://${u}:${pw}@${ip}:${p}#$(url_encode "$n")"; echo
       cnt=$((cnt+1))
@@ -1054,8 +862,7 @@ show_xray_nodes(){
   if [ -f "$HY2_STATE" ]; then
     . "$HY2_STATE" 2>/dev/null || true
     if [ -n "${PORT:-}" ] && [ -n "${DOMAIN:-}" ] && [ -n "${PASS:-}" ] && [ -n "${OBFS:-}" ]; then
-      local hn
-      hn="${BASE_FULL}-HY2"
+      local hn; hn="${BASE_FULL}-HY2"
       purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}#$(url_encode "$hn")"; echo
       cnt=$((cnt+1))
     fi
@@ -1067,7 +874,7 @@ show_xray_nodes(){
 
 manage_socks5(){
   if [ ! -f "$XRAY_CONF" ]; then
-    title "Socks5管理" "$C_BASE"
+    title "Socks5管理" "$C_INFO"
     red "未检测到Xray"
     render_two_col_menu "1|安装Xray|0|返回"
     prompt "请选择:" k
@@ -1077,19 +884,17 @@ manage_socks5(){
       *) return ;;
     esac
   fi
-
   ensure_dns_rule || { red "初始化失败"; pause; return; }
 
   while true; do
-    title "Socks5管理" "$C_BASE"
-    local list
-    list="$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$XRAY_CONF" 2>/dev/null || true)"
+    title "Socks5管理" "$C_INFO"
+    local list; list="$(jq -c '.inbounds[]? | select(.protocol=="socks")' "$XRAY_CONF" 2>/dev/null || true)"
     if [ -z "$list" ]; then
       echo -e "当前:${C_BAD}未配置${C_RST}"
     else
-      hr 64 "$C_BASE"
+      hr 62 "$C_INFO"
       echo "端口      |用户名      |密码"
-      hr 64 "$C_BASE"
+      hr 62 "$C_INFO"
       while read -r line; do
         [ -z "$line" ] && continue
         printf "%-10s|%-12s|%s\n" \
@@ -1098,22 +903,18 @@ manage_socks5(){
           "$(echo "$line" | jq -r '.settings.accounts[0].pass')"
       done <<< "$list"
     fi
-    hr 64 "$C_BASE"
-    render_two_col_menu \
-      "1|安装Socks5|2|修改Socks5" \
-      "3|卸载Socks5|0|返回"
-    hr 64 "$C_BASE"
+    hr 62 "$C_INFO"
+    render_two_col_menu "1|安装Socks5|2|修改Socks5" "3|卸载Socks5|0|返回"
+    hr 62 "$C_INFO"
     prompt "请选择:" c
     case "$c" in
       1)
         prompt "端口:" p; prompt "用户名:" u; prompt "密码:" pw
         if [[ "$p" =~ ^[0-9]+$ && -n "$u" && -n "$pw" ]]; then
-          local ex
-          ex="$(jq --argjson p "$p" '[.inbounds[]? | select(.port==$p)] | length' "$XRAY_CONF")"
+          local ex; ex="$(jq --argjson p "$p" '[.inbounds[]? | select(.port==$p)] | length' "$XRAY_CONF")"
           if [ "$ex" -gt 0 ]; then red "端口已存在"
           else
-            update_xray --argjson p "$p" --arg u "$u" --arg pw "$pw" \
-              '.inbounds += [{"tag":("socks-"+($p|tostring)),"port":$p,"listen":"0.0.0.0","protocol":"socks","settings":{"auth":"password","accounts":[{"user":$u,"pass":$pw}],"udp":true},"sniffing":{"enabled":true,"destOverride":["http","tls"],"metadataOnly":false}}]'
+            update_xray --argjson p "$p" --arg u "$u" --arg pw "$pw" '.inbounds += [{"tag":("socks-"+($p|tostring)),"port":$p,"listen":"0.0.0.0","protocol":"socks","settings":{"auth":"password","accounts":[{"user":$u,"pass":$pw}],"udp":true},"sniffing":{"enabled":true,"destOverride":["http","tls"],"metadataOnly":false}}]'
             svc restart xray; green "添加成功"
           fi
         else red "输入无效"; fi
@@ -1122,8 +923,7 @@ manage_socks5(){
       2)
         prompt "端口:" p; prompt "新用户名:" u; prompt "新密码:" pw
         if [[ "$p" =~ ^[0-9]+$ && -n "$u" && -n "$pw" ]]; then
-          update_xray --argjson p "$p" --arg u "$u" --arg pw "$pw" \
-            '(.inbounds[]? | select(.protocol=="socks" and .port==$p) | .settings.accounts[0]) |= {"user":$u,"pass":$pw}'
+          update_xray --argjson p "$p" --arg u "$u" --arg pw "$pw" '(.inbounds[]? | select(.protocol=="socks" and .port==$p) | .settings.accounts[0]) |= {"user":$u,"pass":$pw}'
           svc restart xray; green "修改成功"
         else red "输入无效"; fi
         pause
@@ -1149,12 +949,10 @@ manage_socks5(){
     esac
   done
 }
-
 apply_freeflow(){
   [ -f "$XRAY_CONF" ] || { red "xray未安装"; return 1; }
   ensure_dns_rule || return 1
-  local uuid ff
-  uuid="$(xray_uuid)"
+  local uuid ff; uuid="$(xray_uuid)"
   update_xray 'del(.inbounds[]? | select(.tag=="ff-in"))'
   if [ "$FREEFLOW_MODE" != "none" ]; then
     ff='{"tag":"ff-in","port":80,"listen":"::","protocol":"vless","settings":{"clients":[{"id":"'"${uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"'"${FREEFLOW_MODE}"'","security":"none","'"${FREEFLOW_MODE}"'Settings":{"path":"'"${FF_PATH}"'"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"metadataOnly":false}}'
@@ -1164,7 +962,7 @@ apply_freeflow(){
 }
 manage_freeflow(){
   if [ ! -f "$XRAY_CONF" ]; then
-    title "免流管理" "$C_BASE"
+    title "免流管理" "$C_INFO"
     red "未检测到Xray"
     render_two_col_menu "1|安装Xray|0|返回"
     prompt "请选择:" k
@@ -1176,41 +974,21 @@ manage_freeflow(){
   fi
 
   while true; do
-    title "免流管理" "$C_BASE"
+    title "免流管理" "$C_INFO"
     local s="${C_BAD}未配置${C_RST}"
-    if [ "$FREEFLOW_MODE" != "none" ]; then
-      local m="${FREEFLOW_MODE^^}"; [ "$m" = "HTTPUPGRADE" ] && m="HTTP+"
-      s="${C_INFO}${m}${C_RST} path=${FF_PATH}"
-    fi
+    if [ "$FREEFLOW_MODE" != "none" ]; then local m="${FREEFLOW_MODE^^}"; [ "$m" = "HTTPUPGRADE" ] && m="HTTP+"; s="${C_INFO}${m}${C_RST} path=${FF_PATH}"; fi
     printf "当前:%b\n" "$s"
-    hr 64 "$C_BASE"
-    render_two_col_menu \
-      "1|修改免流方式|2|修改免流路径" \
-      "3|卸载免流|0|返回"
-    hr 64 "$C_BASE"
-
+    hr 62 "$C_INFO"
+    render_two_col_menu "1|修改免流方式|2|修改免流路径" "3|卸载免流|0|返回"
+    hr 62 "$C_INFO"
     prompt "请选择:" c
     case "$c" in
       1)
-        echo
-        green "请选择免流方式"
-        hr 64 "$C_BASE"
-        echo "1.WS"
-        echo "2.HTTPUpgrade"
-        echo "3.关闭"
-        hr 64 "$C_BASE"
+        echo; green "请选择免流方式"
+        hr 62 "$C_INFO"; echo "1.WS"; echo "2.HTTPUpgrade"; echo "3.关闭"; hr 62 "$C_INFO"
         prompt "请选择:" k
-        case "$k" in
-          1) FREEFLOW_MODE="ws" ;;
-          2) FREEFLOW_MODE="httpupgrade" ;;
-          *) FREEFLOW_MODE="none" ;;
-        esac
-        if [ "$FREEFLOW_MODE" != "none" ]; then
-          prompt "path(回车默认/):" p
-          FF_PATH="$(normalize_path "$p")"
-        else
-          FF_PATH="/"
-        fi
+        case "$k" in 1) FREEFLOW_MODE="ws" ;; 2) FREEFLOW_MODE="httpupgrade" ;; *) FREEFLOW_MODE="none" ;; esac
+        if [ "$FREEFLOW_MODE" != "none" ]; then prompt "path(回车默认/):" p; FF_PATH="$(normalize_path "$p")"; else FF_PATH="/"; fi
         printf '%s\n%s\n' "$FREEFLOW_MODE" "$FF_PATH" > "$FREEFLOW_CONF"
         apply_freeflow; green "已更新"; pause
         ;;
@@ -1239,9 +1017,7 @@ install_sbox_core(){
     local sf ver url tgz
     sf="$(detect_singbox_suffix)"
     [ -z "$sf" ] && { red "架构不支持sing-box"; return 1; }
-
-    ver="$SB_FIXED_VER"
-    tgz="${SB}/sing-box.tar.gz"
+    ver="$SB_FIXED_VER"; tgz="${SB}/sing-box.tar.gz"
     url="https://github.com/SagerNet/sing-box/releases/download/${ver}/sing-box-${ver#v}${sf}.tar.gz"
     smart_download "$tgz" "$url" 5000000 || { red "下载sing-box失败"; return 1; }
     tar -xzf "$tgz" -C "$SB" >/dev/null 2>&1 || return 1
@@ -1254,40 +1030,26 @@ install_sbox_core(){
 ensure_acme(){
   need_cmd openssl || pkg_install openssl
   command -v openssl >/dev/null 2>&1 || { red "缺少openssl，无法安装acme.sh"; return 1; }
-
   [ -x "$HOME/.acme.sh/acme.sh" ] && return 0
-
   if ! command -v crontab >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-      pkg_install cron
-      svc enable cron; svc start cron
-    elif command -v apk >/dev/null 2>&1; then
-      pkg_install dcron
-      rc-service dcron start >/dev/null 2>&1 || true
-      rc-update add dcron default >/dev/null 2>&1 || true
-    else
-      pkg_install cronie
-      svc enable crond; svc start crond
-    fi
+    if command -v apt-get >/dev/null 2>&1; then pkg_install cron; svc enable cron; svc start cron
+    elif command -v apk >/dev/null 2>&1; then pkg_install dcron; rc-service dcron start >/dev/null 2>&1 || true; rc-update add dcron default >/dev/null 2>&1 || true
+    else pkg_install cronie; svc enable crond; svc start crond; fi
   fi
-
   yellow "安装acme.sh..."
   curl -s https://get.acme.sh | sh >/tmp/acme_install.log 2>&1 || true
   [ -x "$HOME/.acme.sh/acme.sh" ] || { red "acme.sh安装失败"; tail -n 80 /tmp/acme_install.log 2>/dev/null || true; return 1; }
   return 0
 }
 issue_cert_cf(){
-  local d="$1" token="$2"
-  local crt="${TLS_DIR}/${d}.crt" key="${TLS_DIR}/${d}.key"
+  local d="$1" token="$2" crt="${TLS_DIR}/${d}.crt" key="${TLS_DIR}/${d}.key"
   mkdir -p "$TLS_DIR"
   [ -s "$crt" ] && [ -s "$key" ] && { green "证书已存在:$d"; return 0; }
-
   ensure_acme || return 1
   export CF_Token="$token"
   yellow "申请证书:$d"
   "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-  "$HOME/.acme.sh/acme.sh" --issue -d "$d" --dns dns_cf -k ec-256 >/tmp/acme_issue.log 2>&1 || {
-    red "签发失败"; tail -n 80 /tmp/acme_issue.log 2>/dev/null || true; return 1; }
+  "$HOME/.acme.sh/acme.sh" --issue -d "$d" --dns dns_cf -k ec-256 >/tmp/acme_issue.log 2>&1 || { red "签发失败"; tail -n 80 /tmp/acme_issue.log 2>/dev/null || true; return 1; }
   "$HOME/.acme.sh/acme.sh" --installcert -d "$d" --fullchainpath "$crt" --keypath "$key" --ecc >/tmp/acme_installcert.log 2>&1 || true
   [ -s "$crt" ] && [ -s "$key" ] || { red "安装证书失败"; tail -n 80 /tmp/acme_installcert.log 2>/dev/null || true; return 1; }
   green "证书安装成功"
@@ -1295,20 +1057,11 @@ issue_cert_cf(){
 open_port(){
   local p="$1" proto="${2:-tcp}"
   command -v ufw >/dev/null 2>&1 && ufw allow "${p}/${proto}" >/dev/null 2>&1 || true
-  if command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --add-port="${p}/${proto}" --permanent >/dev/null 2>&1 || true
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
+  if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="${p}/${proto}" --permanent >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi
 }
-
 build_sbox_dns_servers_json(){
-  jq -nc '[
-    {"type":"https","tag":"dns_cf","server":"1.1.1.1","server_port":443,"path":"/dns-query","detour":"direct_ipv4"},
-    {"type":"https","tag":"dns_gg","server":"8.8.8.8","server_port":443,"path":"/dns-query","detour":"direct_ipv4"},
-    {"type":"https","tag":"dns_q9","server":"9.9.9.9","server_port":443,"path":"/dns-query","detour":"direct_ipv4"}
-  ]'
+  jq -nc '[{"type":"https","tag":"dns_cf","server":"1.1.1.1","server_port":443,"path":"/dns-query","detour":"direct_ipv4"},{"type":"https","tag":"dns_gg","server":"8.8.8.8","server_port":443,"path":"/dns-query","detour":"direct_ipv4"},{"type":"https","tag":"dns_q9","server":"9.9.9.9","server_port":443,"path":"/dns-query","detour":"direct_ipv4"}]'
 }
-
 write_tuic_conf(){
   local domain="$1" port="$2" cc="$3" uuid="$4"
   local crt="${TLS_DIR}/${domain}.crt" key="${TLS_DIR}/${domain}.key"
@@ -1316,60 +1069,19 @@ write_tuic_conf(){
   v6_compat="$(build_v6_compat_domains_json)"
   v6_strict="$(build_v6_strict_domains_json)"
   dns_servers="$(build_sbox_dns_servers_json)"
-
-  dns_rules_json="$(jq -nc --argjson c "$v6_compat" --argjson s "$v6_strict" '
-    (if ($s|length)>0 then [{"domain_suffix":$s,"server":"dns_cf"}] else [] end)
-    +
-    (if ($c|length)>0 then [{"domain_suffix":$c,"server":"dns_cf"}] else [] end)
-  ')"
-
-  route_rules_json="$(jq -nc --argjson c "$v6_compat" --argjson s "$v6_strict" '
-    [{"action":"sniff"}]
-    +
-    (if ($s|length)>0 then [{"domain_suffix":$s,"ip_version":4,"action":"reject","method":"default"}] else [] end)
-    +
-    (if ($s|length)>0 then [{"domain_suffix":$s,"action":"route","outbound":"direct_ipv6"}] else [] end)
-    +
-    (if ($c|length)>0 then [{"domain_suffix":$c,"action":"route","outbound":"direct_ipv6"}] else [] end)
-  ')"
+  dns_rules_json="$(jq -nc --argjson c "$v6_compat" --argjson s "$v6_strict" '(if ($s|length)>0 then [{"domain_suffix":$s,"server":"dns_cf"}] else [] end)+(if ($c|length)>0 then [{"domain_suffix":$c,"server":"dns_cf"}] else [] end)')"
+  route_rules_json="$(jq -nc --argjson c "$v6_compat" --argjson s "$v6_strict" '[{"action":"sniff"}]+(if ($s|length)>0 then [{"domain_suffix":$s,"ip_version":4,"action":"reject","method":"default"}] else [] end)+(if ($s|length)>0 then [{"domain_suffix":$s,"action":"route","outbound":"direct_ipv6"}] else [] end)+(if ($c|length)>0 then [{"domain_suffix":$c,"action":"route","outbound":"direct_ipv6"}] else [] end)')"
 
   cat > "$SB_CONF" <<EOF
 {
   "log": {"disabled": false, "level": "info", "timestamp": true},
-  "dns": {
-    "servers": ${dns_servers},
-    "rules": ${dns_rules_json},
-    "final": "dns_cf",
-    "strategy": "ipv4_only",
-    "independent_cache": true,
-    "cache_capacity": 8192
-  },
-  "inbounds": [
-    {
-      "type":"tuic",
-      "listen":"::",
-      "tag":"tuic-in",
-      "listen_port":${port},
-      "users":[{"uuid":"${uuid}","password":"${uuid}"}],
-      "congestion_control":"${cc}",
-      "tls":{
-        "enabled":true,
-        "server_name":"${domain}",
-        "alpn":["h3"],
-        "certificate_path":"${crt}",
-        "key_path":"${key}"
-      }
-    }
-  ],
-  "outbounds":[
-    {"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}},
-    {"type":"direct","tag":"direct_ipv6","domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}}
-  ],
+  "dns": {"servers": ${dns_servers},"rules": ${dns_rules_json},"final": "dns_cf","strategy": "ipv4_only","independent_cache": true,"cache_capacity": 8192},
+  "inbounds": [{"type":"tuic","listen":"::","tag":"tuic-in","listen_port":${port},"users":[{"uuid":"${uuid}","password":"${uuid}"}],"congestion_control":"${cc}","tls":{"enabled":true,"server_name":"${domain}","alpn":["h3"],"certificate_path":"${crt}","key_path":"${key}"}}],
+  "outbounds":[{"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}},{"type":"direct","tag":"direct_ipv6","domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}}],
   "route":{"rules": ${route_rules_json},"final":"direct_ipv4"}
 }
 EOF
 }
-
 ensure_tuic_service(){
   if service_exists tuic-box; then return; fi
   if is_alpine; then
@@ -1385,18 +1097,8 @@ command_args="run -c \${SINGBOX_CFG}"
 command_background="yes"
 pidfile="\${PIDFILE}"
 depend(){ need net; use dns logger; after firewall; }
-start_pre(){
-  checkpath --directory --mode 0755 /run
-  [ -x "\${SINGBOX_BIN}" ] || return 1
-  [ -f "\${SINGBOX_CFG}" ] || return 1
-  "\${SINGBOX_BIN}" check -c "\${SINGBOX_CFG}" >/dev/null 2>&1
-}
-stop(){
-  [ -f "\${PIDFILE}" ] && start-stop-daemon --stop --pidfile "\${PIDFILE}" --retry TERM/20/KILL/5 >/dev/null 2>&1 || true
-  pkill -f "^\${SINGBOX_BIN} run -c \${SINGBOX_CFG}\$" >/dev/null 2>&1 || true
-  pkill -x sing-box >/dev/null 2>&1 || true
-  rm -f "\${PIDFILE}"
-}
+start_pre(){ checkpath --directory --mode 0755 /run; [ -x "\${SINGBOX_BIN}" ] || return 1; [ -f "\${SINGBOX_CFG}" ] || return 1; "\${SINGBOX_BIN}" check -c "\${SINGBOX_CFG}" >/dev/null 2>&1; }
+stop(){ [ -f "\${PIDFILE}" ] && start-stop-daemon --stop --pidfile "\${PIDFILE}" --retry TERM/20/KILL/5 >/dev/null 2>&1 || true; pkill -f "^\${SINGBOX_BIN} run -c \${SINGBOX_CFG}\$" >/dev/null 2>&1 || true; pkill -x sing-box >/dev/null 2>&1 || true; rm -f "\${PIDFILE}"; }
 EOF
     chmod +x /etc/init.d/tuic-box
   else
@@ -1415,17 +1117,11 @@ EOF
   svc enable tuic-box
 }
 start_tuic_check(){
-  if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check.log 2>&1; then
-    red "sing-box配置校验失败"
-    tail -n 80 /tmp/sb_check.log 2>/dev/null || true
-    return 1
-  fi
-  svc restart tuic-box
-  sleep 1
+  if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check.log 2>&1; then red "sing-box配置校验失败"; tail -n 80 /tmp/sb_check.log 2>/dev/null || true; return 1; fi
+  svc restart tuic-box; sleep 1
   if is_running tuic-box; then return 0; fi
   red "Tuic启动失败"
-  if is_alpine; then rc-service tuic-box status 2>/dev/null || true
-  else journalctl -u tuic-box -n 80 --no-pager || true; fi
+  if is_alpine; then rc-service tuic-box status 2>/dev/null || true; else journalctl -u tuic-box -n 80 --no-pager || true; fi
   return 1
 }
 install_tuic(){
@@ -1435,25 +1131,17 @@ install_tuic(){
   prompt "CloudflareAPIToken:" token; [ -z "$token" ] && { red "Token不能为空"; return 1; }
   prompt "Tuic端口(默认18443):" port; [ -z "$port" ] && port=18443
   [[ "$port" =~ ^[0-9]+$ ]] || { red "端口无效"; return 1; }
-
   echo "拥塞算法:1.bbr 2.cubic 3.new_reno"
   prompt "选择(默认1):" s
   case "$s" in 2) cc="cubic" ;; 3) cc="new_reno" ;; *) cc="bbr" ;; esac
-
-  def="$(xray_uuid)"
-  prompt "TuicUUID(回车默认${def}):" uuid
-  [ -z "$uuid" ] && uuid="$def"
-
+  def="$(xray_uuid)"; prompt "TuicUUID(回车默认${def}):" uuid; [ -z "$uuid" ] && uuid="$def"
   issue_cert_cf "$domain" "$token" || return 1
   open_port "$port" udp
   write_tuic_conf "$domain" "$port" "$cc" "$uuid"
   ensure_tuic_service
-
   apply_policy_sbox || true
-
   start_tuic_check || return 1
-  mkdir -p "$SB"
-  printf '%s|%s|%s|%s\n' "$port" "$cc" "$domain" "$uuid" > "$SB_STATE"
+  mkdir -p "$SB"; printf '%s|%s|%s|%s\n' "$port" "$cc" "$domain" "$uuid" > "$SB_STATE"
   green "Tuic安装成功(sing-box${SB_FIXED_VER})"
 }
 show_tuic_node(){
@@ -1471,8 +1159,7 @@ show_tuic_node(){
   echo "======================================"
 }
 uninstall_tuic(){
-  svc stop tuic-box
-  svc disable tuic-box
+  svc stop tuic-box; svc disable tuic-box
   rm -f /etc/init.d/tuic-box /etc/systemd/system/tuic-box.service
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
   rm -rf "$SB"
@@ -1482,128 +1169,51 @@ uninstall_tuic(){
 foreground_sbox_log(){
   [ -x "$SB_BIN" ] || { red "sing-box未安装"; pause; return 1; }
   [ -f "$SB_CONF" ] || { red "缺少配置:$SB_CONF"; pause; return 1; }
-
   local bak="${SB_CONF}.bak.fg.$(date +%s)"
   cp -a "$SB_CONF" "$bak"
-
-  if ! jq '.log.disabled=false | .log.level="debug" | .log.timestamp=true' "$SB_CONF" > "${SB_CONF}.tmp"; then
-    red "写入日志配置失败"
-    rm -f "${SB_CONF}.tmp" "$bak"
-    pause
-    return 1
-  fi
+  if ! jq '.log.disabled=false | .log.level="debug" | .log.timestamp=true' "$SB_CONF" > "${SB_CONF}.tmp"; then red "写入日志配置失败"; rm -f "${SB_CONF}.tmp" "$bak"; pause; return 1; fi
   mv "${SB_CONF}.tmp" "$SB_CONF"
-
-  if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check_fg.log 2>&1; then
-    red "配置校验失败，无法前台运行"
-    cp -f "$bak" "$SB_CONF"
-    rm -f "$bak"
-    tail -n 80 /tmp/sb_check_fg.log 2>/dev/null || true
-    pause
-    return 1
-  fi
-
+  if ! "$SB_BIN" check -c "$SB_CONF" >/tmp/sb_check_fg.log 2>&1; then red "配置校验失败，无法前台运行"; cp -f "$bak" "$SB_CONF"; rm -f "$bak"; tail -n 80 /tmp/sb_check_fg.log 2>/dev/null || true; pause; return 1; fi
   yellow "即将停止tuic-box后台服务并前台输出日志..."
   svc stop tuic-box || true
   pkill -f "^${SB_BIN} run -c ${SB_CONF}$" >/dev/null 2>&1 || true
   pkill -x sing-box >/dev/null 2>&1 || true
   sleep 1
-
   green "前台日志已启动(Ctrl+C退出)"
   echo "日志文件:/tmp/sb-live.log"
-
-  local old_int_trap
-  old_int_trap="$(trap -p INT || true)"
+  local old_int_trap; old_int_trap="$(trap -p INT || true)"
   trap ':' INT
-
-  set +e
-  "$SB_BIN" run -c "$SB_CONF" 2>&1 | tee /tmp/sb-live.log
-  set -e
-
-  if [ -n "$old_int_trap" ]; then
-    eval "$old_int_trap"
-  else
-    trap - INT
-  fi
-
-  cp -f "$bak" "$SB_CONF"
-  rm -f "$bak"
-
+  set +e; "$SB_BIN" run -c "$SB_CONF" 2>&1 | tee /tmp/sb-live.log; set -e
+  if [ -n "$old_int_trap" ]; then eval "$old_int_trap"; else trap - INT; fi
+  cp -f "$bak" "$SB_CONF"; rm -f "$bak"
   yellow "已退出前台日志，正在恢复后台服务..."
-  svc start tuic-box || true
-  sleep 1
-  if is_running tuic-box; then
-    green "tuic-box已恢复后台运行"
-  else
-    red "tuic-box恢复失败，请手动检查"
-  fi
+  svc start tuic-box || true; sleep 1
+  is_running tuic-box && green "tuic-box已恢复后台运行" || red "tuic-box恢复失败，请手动检查"
   pause
 }
-
 foreground_xray_log(){
   [ -x "$XRAY_BIN" ] || { red "xray未安装"; pause; return 1; }
   [ -f "$XRAY_CONF" ] || { red "缺少配置:$XRAY_CONF"; pause; return 1; }
-
   local bak="${XRAY_CONF}.bak.fg.$(date +%s)"
   cp -a "$XRAY_CONF" "$bak"
-
-  if ! jq '
-      .log = (.log // {})
-      | .log.access = ""
-      | .log.error = ""
-      | .log.loglevel = "debug"
-      | .log.dnsLog = true
-    ' "$XRAY_CONF" > "${XRAY_CONF}.tmp"; then
-    red "写入Xray日志配置失败"
-    rm -f "${XRAY_CONF}.tmp" "$bak"
-    pause
-    return 1
-  fi
+  if ! jq '.log = (.log // {}) | .log.access = "" | .log.error = "" | .log.loglevel = "debug" | .log.dnsLog = true' "$XRAY_CONF" > "${XRAY_CONF}.tmp"; then red "写入Xray日志配置失败"; rm -f "${XRAY_CONF}.tmp" "$bak"; pause; return 1; fi
   mv "${XRAY_CONF}.tmp" "$XRAY_CONF"
-
-  if ! "$XRAY_BIN" run -test -c "$XRAY_CONF" >/tmp/xray_check_fg.log 2>&1; then
-    red "Xray配置校验失败，无法前台运行"
-    cp -f "$bak" "$XRAY_CONF"
-    rm -f "$bak"
-    tail -n 80 /tmp/xray_check_fg.log 2>/dev/null || true
-    pause
-    return 1
-  fi
-
+  if ! "$XRAY_BIN" run -test -c "$XRAY_CONF" >/tmp/xray_check_fg.log 2>&1; then red "Xray配置校验失败，无法前台运行"; cp -f "$bak" "$XRAY_CONF"; rm -f "$bak"; tail -n 80 /tmp/xray_check_fg.log 2>/dev/null || true; pause; return 1; fi
   yellow "即将停止xray后台服务并前台输出日志..."
   svc stop xray || true
   pkill -f "^${XRAY_BIN} run -c ${XRAY_CONF}$" >/dev/null 2>&1 || true
   pkill -x xray >/dev/null 2>&1 || true
   sleep 1
-
   green "前台日志已启动(Ctrl+C退出)"
   echo "日志文件:/tmp/xray-live.log"
-
-  local old_int_trap
-  old_int_trap="$(trap -p INT || true)"
+  local old_int_trap; old_int_trap="$(trap -p INT || true)"
   trap ':' INT
-
-  set +e
-  "$XRAY_BIN" run -c "$XRAY_CONF" 2>&1 | tee /tmp/xray-live.log
-  set -e
-
-  if [ -n "$old_int_trap" ]; then
-    eval "$old_int_trap"
-  else
-    trap - INT
-  fi
-
-  cp -f "$bak" "$XRAY_CONF"
-  rm -f "$bak"
-
+  set +e; "$XRAY_BIN" run -c "$XRAY_CONF" 2>&1 | tee /tmp/xray-live.log; set -e
+  if [ -n "$old_int_trap" ]; then eval "$old_int_trap"; else trap - INT; fi
+  cp -f "$bak" "$XRAY_CONF"; rm -f "$bak"
   yellow "已退出前台日志，正在恢复后台服务..."
-  svc start xray || true
-  sleep 1
-  if is_running xray; then
-    green "xray已恢复后台运行"
-  else
-    red "xray恢复失败，请手动检查"
-  fi
+  svc start xray || true; sleep 1
+  is_running xray && green "xray已恢复后台运行" || red "xray恢复失败，请手动检查"
   pause
 }
 
@@ -1614,21 +1224,13 @@ setup_cron_env(){
   else pkg_install cronie; svc enable crond; svc start crond; fi
 }
 manage_restart_hours(){
-  title "定时重启" "$C_RESTART_K"
+  title "定时重启" "$C_RESTART"
   green "当前间隔:${RESTART_HOURS}小时(0=关闭)"
   prompt "输入间隔小时:" h
   [[ "$h" =~ ^[0-9]+$ ]] || { red "输入无效"; return; }
-  RESTART_HOURS="$h"
-  echo "$RESTART_HOURS" > "$RESTART_CONF"
-
-  if [ "$RESTART_HOURS" -eq 0 ]; then
-    command -v crontab >/dev/null 2>&1 && (crontab -l 2>/dev/null | sed '/#svc-restart-all/d') | crontab -
-    green "已关闭"
-    return
-  fi
-
-  setup_cron_env
-  command -v crontab >/dev/null 2>&1 || { red "crontab不可用"; return; }
+  RESTART_HOURS="$h"; echo "$RESTART_HOURS" > "$RESTART_CONF"
+  if [ "$RESTART_HOURS" -eq 0 ]; then command -v crontab >/dev/null 2>&1 && (crontab -l 2>/dev/null | sed '/#svc-restart-all/d') | crontab -; green "已关闭"; return; fi
+  setup_cron_env; command -v crontab >/dev/null 2>&1 || { red "crontab不可用"; return; }
 
   local cmd exp
   if is_alpine; then
@@ -1646,9 +1248,7 @@ swap_disable_all(){
   awk 'NR>1{print $1}' /proc/swaps 2>/dev/null | while read -r d; do [ -n "$d" ] && swapoff "$d" >/dev/null 2>&1 || true; done
   [ -f /swapfile ] && rm -f /swapfile
   swap_cleanup_fstab
-  if [ -d /sys/class/zram-control ] || [ -e /dev/zram0 ]; then
-    for z in /sys/block/zram*; do [ -d "$z" ] || continue; echo 1 > "$z/reset" 2>/dev/null || true; done
-  fi
+  if [ -d /sys/class/zram-control ] || [ -e /dev/zram0 ]; then for z in /sys/block/zram*; do [ -d "$z" ] || continue; echo 1 > "$z/reset" 2>/dev/null || true; done; fi
 }
 zram_supported(){
   [ -e /dev/zram0 ] && return 0
@@ -1660,9 +1260,7 @@ zram_supported(){
 create_zram_swap(){
   local mb="$1" zdev=""
   if [ -e /dev/zram0 ]; then zdev="/dev/zram0"
-  elif [ -w /sys/class/zram-control/hot_add ]; then
-    local id; id="$(cat /sys/class/zram-control/hot_add 2>/dev/null || true)"; [ -n "$id" ] && zdev="/dev/zram${id}"
-  fi
+  elif [ -w /sys/class/zram-control/hot_add ]; then local id; id="$(cat /sys/class/zram-control/hot_add 2>/dev/null || true)"; [ -n "$id" ] && zdev="/dev/zram${id}"; fi
   [ -z "$zdev" ] && return 1
   local zn="${zdev#/dev/}"
   echo 1 > "/sys/block/${zn}/reset" 2>/dev/null || true
@@ -1699,18 +1297,13 @@ create_swap_best(){
 }
 manage_swap(){
   while true; do
-    title "Swap管理" "$C_SWAP_K"
-    local ram sw
-    ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null); [ -z "$ram" ] && ram=0
+    title "Swap管理" "$C_SWAP"
+    local ram sw; ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null); [ -z "$ram" ] && ram=0
     sw=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null); [ -z "$sw" ] && sw=0
     echo "RAM:${ram}MB  SWAP:${sw}MB"
-    hr 64 "$C_SWAP_K"
-
-    render_two_col_menu \
-      "1|安装/修改Swap|2|卸载Swap" \
-      "0|返回|"
-    hr 64 "$C_SWAP_K"
-
+    hr 62 "$C_SWAP"
+    render_two_col_menu "1|安装/修改Swap|2|卸载Swap" "0|返回|"
+    hr 62 "$C_SWAP"
     prompt "请选择:" c
     case "$c" in
       1) prompt "大小MB(默认256):" mb; mb=${mb:-256}; [[ "$mb" =~ ^[0-9]+$ ]] && [ "$mb" -gt 0 ] && create_swap_best "$mb" || red "输入无效"; pause ;;
@@ -1725,8 +1318,7 @@ install_shortcut(){
   mkdir -p "$WORK"
   local mark="${WORK}/.shortcut_done" src dst="/usr/local/bin/ssgo"
   [ -f "$mark" ] && { green "快捷方式已存在:ssgo"; return; }
-  src="$(readlink -f "$0" 2>/dev/null || true)"
-  [ -z "$src" ] && src="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+  src="$(readlink -f "$0" 2>/dev/null || true)"; [ -z "$src" ] && src="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
   if [ -n "$src" ] && [ -f "$src" ]; then
     cp -f "$src" "${WORK}/manager.sh" 2>/dev/null || true
     cat > "$dst" <<'EOF'
@@ -1741,31 +1333,24 @@ EOF
     yellow "无法识别脚本源路径，稍后可手动创建"
   fi
 }
-
 full_uninstall(){
   svc stop tunnel-argo; svc disable tunnel-argo
   svc stop xray; svc disable xray
   svc stop tuic-box; svc disable tuic-box
-
   rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
   rm -f /etc/init.d/xray /etc/systemd/system/xray.service
   rm -f /etc/init.d/tuic-box /etc/systemd/system/tuic-box.service
-
   command -v systemctl >/dev/null 2>&1 && { systemctl daemon-reload >/dev/null 2>&1 || true; systemctl reset-failed >/dev/null 2>&1 || true; }
-
   command -v crontab >/dev/null 2>&1 && (crontab -l 2>/dev/null | sed '/#svc-restart-all/d') | crontab - 2>/dev/null || true
   swap_disable_all >/dev/null 2>&1 || true
-
   rm -f /usr/local/bin/ssgo /usr/bin/ssgo
   rm -rf "$WORK" "$SB" "$TLS_DIR"
-
   green "已彻底卸载"
 }
 
 manage_outbound_menu(){
   while true; do
-    title "出站管理(Xray+Sbox)" "$C_OUTBOUND_K"
-
+    title "出站管理(Xray+Sbox)" "$C_OUTBOUND"
     local merged_list merged_json merged_disp
     merged_list="$(merge_csv "$V6_COMPAT_SITES" "$V6_STRICT_SITES")"
     merged_json="$(csv_to_json_unique "$merged_list")"
@@ -1776,12 +1361,9 @@ manage_outbound_menu(){
     echo -e "YouTube模式:${C_INFO}$(yt_mode_str)${C_RST}"
     echo -e "IPv6出站列表:${C_INFO}$(clip_text "$merged_disp" 58)${C_RST}"
 
-    hr 64 "$C_OUTBOUND_K"
-    render_two_col_menu \
-      "1|设置YouTube模式|2|添加IPv6规则" \
-      "3|删除IPv6规则|4|重启服务应用规则" \
-      "0|返回|"
-    hr 64 "$C_OUTBOUND_K"
+    hr 62 "$C_OUTBOUND"
+    render_two_col_menu "1|设置YouTube模式|2|添加IPv6规则" "3|删除IPv6规则|4|重启服务应用规则" "0|返回|"
+    hr 62 "$C_OUTBOUND"
 
     prompt "请选择:" c
     case "$c" in
@@ -1797,41 +1379,25 @@ manage_outbound_menu(){
         echo "选择模式:1=兼容 2=严格"
         prompt "输入模式:" md
         case "$md" in
-          1)
-            [ -z "$V6_COMPAT_SITES" ] && V6_COMPAT_SITES="$s" || V6_COMPAT_SITES="${V6_COMPAT_SITES},${s}"
-            V6_COMPAT_SITES="$(echo "$V6_COMPAT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
-            ;;
-          2)
-            [ -z "$V6_STRICT_SITES" ] && V6_STRICT_SITES="$s" || V6_STRICT_SITES="${V6_STRICT_SITES},${s}"
-            V6_STRICT_SITES="$(echo "$V6_STRICT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
-            ;;
+          1) [ -z "$V6_COMPAT_SITES" ] && V6_COMPAT_SITES="$s" || V6_COMPAT_SITES="${V6_COMPAT_SITES},${s}"; V6_COMPAT_SITES="$(echo "$V6_COMPAT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')" ;;
+          2) [ -z "$V6_STRICT_SITES" ] && V6_STRICT_SITES="$s" || V6_STRICT_SITES="${V6_STRICT_SITES},${s}"; V6_STRICT_SITES="$(echo "$V6_STRICT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')" ;;
           *) red "模式无效"; pause; continue ;;
         esac
         save_outbound; apply_policy_all; green "已添加并应用"; pause
         ;;
       3)
-        local all_json
-        all_json="$(csv_to_json_unique "$(merge_csv "$V6_COMPAT_SITES" "$V6_STRICT_SITES")")"
-        if [ "$(echo "$all_json" | jq 'length')" -eq 0 ]; then
-          red "规则为空"; pause; continue
-        fi
-        echo "当前IPv6规则:"
-        echo "$all_json" | jq -r '.[]' | nl -w2 -s'. '
-        echo " 0.取消"
+        local all_json; all_json="$(csv_to_json_unique "$(merge_csv "$V6_COMPAT_SITES" "$V6_STRICT_SITES")")"
+        if [ "$(echo "$all_json" | jq 'length')" -eq 0 ]; then red "规则为空"; pause; continue; fi
+        echo "当前IPv6规则:"; echo "$all_json" | jq -r '.[]' | nl -w2 -s'. '; echo " 0.取消"
         prompt "输入序号:" idx
         [[ "$idx" =~ ^[0-9]+$ ]] || { red "输入无效"; pause; continue; }
         [ "$idx" -eq 0 ] && continue
-
-        local target
-        target="$(echo "$all_json" | jq -r ".[$((idx-1))] // empty")"
+        local target; target="$(echo "$all_json" | jq -r ".[$((idx-1))] // empty")"
         [ -z "$target" ] && { red "序号无效"; pause; continue; }
 
         local cjson sjson
-        cjson="$(csv_to_json_unique "$V6_COMPAT_SITES")"
-        V6_COMPAT_SITES="$(echo "$cjson" | jq -r --arg t "$target" '[.[]|select(.!=$t)]|join(",")')"
-
-        sjson="$(csv_to_json_unique "$V6_STRICT_SITES")"
-        V6_STRICT_SITES="$(echo "$sjson" | jq -r --arg t "$target" '[.[]|select(.!=$t)]|join(",")')"
+        cjson="$(csv_to_json_unique "$V6_COMPAT_SITES")"; V6_COMPAT_SITES="$(echo "$cjson" | jq -r --arg t "$target" '[.[]|select(.!=$t)]|join(",")')"
+        sjson="$(csv_to_json_unique "$V6_STRICT_SITES")"; V6_STRICT_SITES="$(echo "$sjson" | jq -r --arg t "$target" '[.[]|select(.!=$t)]|join(",")')"
 
         save_outbound; apply_policy_all
         green "已删除并应用:$target"
@@ -1847,25 +1413,13 @@ manage_outbound_menu(){
 xray_menu(){
   while true; do
     local xs as hs
-    if [ -x "$XRAY_BIN" ]; then
-      xs=$(is_running xray && echo "${C_OK}运行中${C_RST}" || echo "${C_BAD}未启动${C_RST}")
-    else
-      xs="${C_BAD}未安装${C_RST}"
-    fi
-    if service_exists tunnel-argo; then
-      as=$(is_running tunnel-argo && echo "${C_OK}运行中${C_RST}" || echo "${C_BAD}未启动${C_RST}")
-    else
-      as="${C_BAD}未配置${C_RST}"
-    fi
-    if [ -f "$HY2_STATE" ]; then
-      hs="${C_OK}已配置${C_RST}"
-    else
-      hs="${C_BAD}未配置${C_RST}"
-    fi
+    if [ -x "$XRAY_BIN" ]; then xs=$(is_running xray && echo "${C_OK}运行中${C_RST}" || echo "${C_BAD}未启动${C_RST}"); else xs="${C_BAD}未安装${C_RST}"; fi
+    if service_exists tunnel-argo; then as=$(is_running tunnel-argo && echo "${C_OK}运行中${C_RST}" || echo "${C_BAD}未启动${C_RST}"); else as="${C_BAD}未配置${C_RST}"; fi
+    if [ -f "$HY2_STATE" ]; then hs="${C_OK}已配置${C_RST}"; else hs="${C_BAD}未配置${C_RST}"; fi
 
-    title "Xray管理" "$C_XRAY_K"
-    echo -e "${C_XRAY_K}Xray${C_RST}:${xs}   ${C_ARGO}Argo${C_RST}:${as}   ${C_HY2}HY2${C_RST}:${hs}"
-    hr 64 "$C_XRAY_K"
+    title "Xray管理" "$C_XRAY"
+    echo -e "${C_XRAY}Xray${C_RST}:${xs}   ${C_ARGO}Argo${C_RST}:${as}   ${C_HY2}HY2${C_RST}:${hs}"
+    hr 62 "$C_XRAY"
 
     render_two_col_menu \
       "1|安装Argo|6|查看节点" \
@@ -1874,19 +1428,14 @@ xray_menu(){
       "4|配置免流|0|返回" \
       "5|重启Xray与Argo|9|卸载Xray"
 
-    hr 64 "$C_XRAY_K"
+    hr 62 "$C_XRAY"
     prompt "请选择:" c
     case "$c" in
       1) install_argo; pause ;;
       2) install_hy2; pause ;;
       3) manage_socks5 ;;
       4) manage_freeflow ;;
-      5)
-        service_exists xray && svc restart xray
-        service_exists tunnel-argo && svc restart tunnel-argo
-        green "重启完成"
-        pause
-        ;;
+      5) service_exists xray && svc restart xray; service_exists tunnel-argo && svc restart tunnel-argo; green "重启完成"; pause ;;
       6) show_xray_nodes; pause ;;
       7) prompt "新UUID(回车自动):" u; [ -z "$u" ] && u="$(gen_uuid)"; set_xray_uuid "$u"; pause ;;
       8) foreground_xray_log ;;
@@ -1903,26 +1452,15 @@ xray_menu(){
     esac
   done
 }
-
 sbox_menu(){
   while true; do
     local st
-    if [ -x "$SB_BIN" ]; then
-      st=$(is_running tuic-box && echo "${C_OK}运行中${C_RST}" || echo "${C_BAD}未启动${C_RST}")
-    else
-      st="${C_BAD}未安装${C_RST}"
-    fi
-
-    title "Sbox管理" "$C_SBOX_K"
-    echo -e "${C_SBOX_K}Sbox${C_RST}:${st}"
-    hr 64 "$C_SBOX_K"
-
-    render_two_col_menu \
-      "1|安装Tuic|2|查看节点" \
-      "3|重启Tuic|5|实时日志" \
-      "4|卸载Tuic|0|返回"
-
-    hr 64 "$C_SBOX_K"
+    if [ -x "$SB_BIN" ]; then st=$(is_running tuic-box && echo "${C_OK}运行中${C_RST}" || echo "${C_BAD}未启动${C_RST}"); else st="${C_BAD}未安装${C_RST}"; fi
+    title "Sbox管理" "$C_SBOX"
+    echo -e "${C_SBOX}Sbox${C_RST}:${st}"
+    hr 62 "$C_SBOX"
+    render_two_col_menu "1|安装Tuic|2|查看节点" "3|重启Tuic|5|实时日志" "4|卸载Tuic|0|返回"
+    hr 62 "$C_SBOX"
     prompt "请选择:" c
     case "$c" in
       1) install_tuic; pause ;;
@@ -1942,33 +1480,20 @@ sys_info(){
     osv="Alpine$(cat /etc/alpine-release 2>/dev/null || echo "")"
   elif [ -f /etc/os-release ]; then
     . /etc/os-release
-    if [ -n "${ID:-}" ] && [ -n "${VERSION_ID:-}" ]; then
-      osv="$(echo "$ID" | sed 's/^[a-z]/\U&/')${VERSION_ID}"
-    else
-      osv="${PRETTY_NAME:-Linux}"
-    fi
+    if [ -n "${ID:-}" ] && [ -n "${VERSION_ID:-}" ]; then osv="$(echo "$ID" | sed 's/^[a-z]/\U&/')${VERSION_ID}"
+    else osv="${PRETTY_NAME:-Linux}"; fi
   else
     osv="Linux"
   fi
-
   ker="$(cut -d- -f1 < /proc/sys/kernel/osrelease 2>/dev/null || uname -r)"
-
-  if command -v systemd-detect-virt >/dev/null 2>&1; then
-    virt="$(systemd-detect-virt 2>/dev/null || echo unknown)"
+  if command -v systemd-detect-virt >/dev/null 2>&1; then virt="$(systemd-detect-virt 2>/dev/null || echo unknown)"
   else
-    if grep -qaE 'docker|containerd|kubepods' /proc/1/cgroup 2>/dev/null; then
-      virt="docker"
-    elif grep -qa 'lxc' /proc/1/cgroup 2>/dev/null || grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
-      virt="lxc"
-    elif [ -f /proc/vz/version ]; then
-      virt="openvz"
-    elif grep -qi 'kvm' /proc/cpuinfo 2>/dev/null; then
-      virt="kvm"
-    else
-      virt="unknown"
-    fi
+    if grep -qaE 'docker|containerd|kubepods' /proc/1/cgroup 2>/dev/null; then virt="docker"
+    elif grep -qa 'lxc' /proc/1/cgroup 2>/dev/null || grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then virt="lxc"
+    elif [ -f /proc/vz/version ]; then virt="openvz"
+    elif grep -qi 'kvm' /proc/cpuinfo 2>/dev/null; then virt="kvm"
+    else virt="unknown"; fi
   fi
-
   mem="$(awk '/MemTotal/{m=$2/1024; if(m>1024) printf"%.1fG",m/1024; else printf"%.0fM",m}' /proc/meminfo 2>/dev/null)"
   disk="$(df -h / 2>/dev/null | awk 'NR==2{print $2}')"
   echo "${osv}|${ker}|${virt^^}|${mem}|${disk}"
@@ -1983,24 +1508,17 @@ main_menu(){
   load_state
   load_ip_cache >/dev/null 2>&1 || true
 
-  [ "$IP_CHECKED" = "1" ] || {
-    cls
-    echo -e "${C_WARN}IP信息加载中，请稍候...${C_RST}"
-    check_ip || { red "IP检测失败，已跳过(不影响进入菜单)"; sleep 1; }
-  }
+  [ "$IP_CHECKED" = "1" ] || { cls; echo -e "${C_WARN}IP信息加载中，请稍候...${C_RST}"; check_ip || { red "IP检测失败，已跳过(不影响进入菜单)"; sleep 1; }; }
 
   while true; do
     cls
     [ -f "$IPCACHE" ] && {
-      local mt
-      mt=$(stat -c %Y "$IPCACHE" 2>/dev/null || echo 0)
+      local mt; mt=$(stat -c %Y "$IPCACHE" 2>/dev/null || echo 0)
       [ "$mt" -gt "${IP_CACHE_MTIME:-0}" ] && IP_CACHE_MTIME="$mt" && load_ip_cache >/dev/null 2>&1 || true
     }
 
     local info mem u4 u6 cols
-    info="$(sys_info)"
-    mem="$(mem_used_disp)"
-    cols="$(term_cols)"
+    info="$(sys_info)"; mem="$(mem_used_disp)"; cols="$(term_cols)"
 
     if [ -n "$WAN4" ]; then
       u4="${WAN4}(${COUNTRY4:-??} ${ISP4:-unknown})"
@@ -2009,7 +1527,6 @@ main_menu(){
     else
       u4="${C_BAD}未检出${C_RST}"
     fi
-
     if [ -n "$WAN6" ]; then
       u6="${WAN6}(${COUNTRY6:-??} ${ISP6:-unknown})"
       u6="$(clip_text "$u6" "$((cols-8))")"
@@ -2022,8 +1539,7 @@ main_menu(){
     echo -e "v4 :${u4}"
     echo -e "v6 :${u6}"
     echo -e "Mem:${C_INFO}${mem}${C_RST}"
-    hr 64 "$C_TITLE"
-    printf "%b【主页菜单(左列1234/右列5690)】%b\n" "$C_TITLE" "$C_RST"
+    hr 62 "$C_INFO"
 
     render_two_col_menu \
       "1|管理Xray|5|管理Swap" \
@@ -2031,7 +1547,7 @@ main_menu(){
       "3|管理出站|9|彻底卸载" \
       "4|定时重启|0|退出"
 
-    hr 64 "$C_TITLE"
+    hr 62 "$C_INFO"
     prompt "请选择:" c
     case "$c" in
       1) xray_menu ;;
