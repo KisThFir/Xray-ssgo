@@ -33,7 +33,7 @@ url_encode(){ jq -rn --arg x "$1" '$x|@uri'; }
 C_NUM="\033[1;36m"
 C_TXT="\033[1;36m"
 
-KW_POOL=("\033[1;32m" "\033[1;35m" "\033[1;33m" "\033[1;34m" "\033[1;92m")
+KW_POOL=("\033[1;32m" "\033[1;35m" "\033[1;33m" "\033[1;91m" "\033[1;92m")
 _LAST_KW_IDX=-1
 
 pick_kw_color(){
@@ -54,7 +54,7 @@ auto_hl(){
       ;;
   esac
 
-  # 任何包含“卸载”都红色强调（其余部分保持基础色）
+  # 含“卸载”固定红色
   if [[ "$s" == *卸载* ]]; then
     left="${s%%卸载*}"
     right="${s#*卸载}"
@@ -65,9 +65,9 @@ auto_hl(){
     return
   fi
 
-  # 前缀 + 关键词高亮：如 管理Xray / 安装Tuic / 修改UUID
+  # 前缀 + 关键词高亮
   for pre in 管理 安装 查看 修改 重启 设置 创建 实时 配置 启用 关闭 删除 添加 定时 彻底; do
-    if [[ "$s" == ${pre}* ]]; then
+    if [[ "$s" == "$pre"* ]]; then
       kw="${s#$pre}"
       if [ -z "$kw" ]; then
         printf "%b%s%b" "$C_TXT" "$s" "$C_RST"
@@ -79,7 +79,6 @@ auto_hl(){
     fi
   done
 
-  # 未命中前缀时：整体基础色
   printf "%b%s%b" "$C_TXT" "$s" "$C_RST"
 }
 
@@ -1591,12 +1590,16 @@ install_shortcut(){
   local mark="${WORK}/.shortcut_done"
   local local_script="${WORK}/manager.sh"
   local dst="/usr/local/bin/ssgo"
+  local url1="${SCRIPT_URL:-https://raw.githubusercontent.com/KisThFir/Xray-ssgo/refs/heads/main/Xray_ssgo.sh}"
+  local url2="https://raw.githubusercontent.com/KisThFir/Xray-ssgo/main/Xray_ssgo.sh"
 
   yellow "正在拉取脚本到本地: ${local_script}"
-  smart_download "$local_script" "$SCRIPT_URL" 200000 || {
-    red "拉取失败: $SCRIPT_URL"
-    return 1
-  }
+
+  # 关键修复：最小大小改小，不再用 200000
+  if ! smart_download "$local_script" "$url1" 5000; then
+    yellow "主地址失败，尝试备用地址..."
+    smart_download "$local_script" "$url2" 5000 || { red "拉取失败: $url1"; return 1; }
+  fi
 
   # 权限修复
   chmod 755 "$WORK" 2>/dev/null || true
