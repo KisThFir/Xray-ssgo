@@ -94,7 +94,8 @@ term_cols(){
 
 menu_row2_auto(){
   local lnum="$1" ltxt="$2" rnum="${3:-}" rtxt="${4:-}"
-  local left right
+  local left right right_col=40
+
   left="$(printf "%b%2s.%b %s" "$C_NUM" "$lnum" "$C_RST" "$(auto_hl "$ltxt")")"
 
   if [ -z "$rnum" ] || [ -z "$rtxt" ]; then
@@ -103,9 +104,7 @@ menu_row2_auto(){
   fi
 
   right="$(printf "%b%2s.%b %s" "$C_NUM" "$rnum" "$C_RST" "$(auto_hl "$rtxt")")"
-
-  # 不自己算长度，直接固定占位输出
-  printf "%-36b %b\n" "$left" "$right"
+  printf "%s\033[%sG%s\n" "$left" "$right_col" "$right"
 }
 
 menu_item_auto(){
