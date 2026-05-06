@@ -1134,6 +1134,11 @@ write_tuic_conf(){
       "listen_port":${port},
       "users":[{"uuid":"${uuid}","password":"${uuid}"}],
       "congestion_control":"${cc}",
+      "sniffing":{
+        "enabled":true,
+        "destOverride":["http","tls","quic"],
+        "metadata_only":false
+      },
       "tls":{
         "enabled":true,
         "server_name":"${domain}",
