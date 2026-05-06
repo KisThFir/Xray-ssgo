@@ -3,7 +3,7 @@ set -euo pipefail
 
 # =========================================================
 #  一体化管理脚本（Xray / Argo / HY2 / Tuic / 出站策略）
-#  - 完整可覆盖版（修复：LXC识别/窄屏排版/快捷方式拉取本地）
+#  - 完整可覆盖版（修复：HY2协议 / 端口跳跃 / LXC降级）
 # =========================================================
 
 # ========== Color ==========
@@ -133,6 +133,7 @@ RESTART_CONF="${WORK}/restart.conf"
 OUTBOUND_CONF="${WORK}/outbound_policy.conf"
 IPCACHE="${WORK}/ip_cache.conf"
 HY2_STATE="${WORK}/hy2_state.conf"
+HY2_HOP_STATE="${WORK}/hy2_hop_state.conf"
 
 SWAP_LOG="/tmp/swap.log"
 
@@ -226,6 +227,7 @@ ensure_deps(){
   need_cmd tar || pkg_install tar
   need_cmd unzip || pkg_install unzip
   need_cmd openssl || pkg_install openssl
+  need_cmd ss || pkg_install iproute2
   [ -f /etc/alpine-release ] && pkg_install ca-certificates || true
 
   for c in jq wget curl ip base64 tar unzip openssl; do
@@ -299,6 +301,110 @@ update_xray(){
     return 1
   fi
   mv "${XRAY_CONF}.tmp" "$XRAY_CONF"
+}
+
+# ========== HY2 hop helper ==========
+is_lxc_env(){
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    local v
+    v="$(systemd-detect-virt --container 2>/dev/null || true)"
+    echo "$v" | grep -qi '^lxc$' && return 0
+  fi
+  tr '\0' '\n' </proc/1/environ 2>/dev/null | grep -qi '^container=lxc$' && return 0
+  grep -qa 'lxc' /proc/1/cgroup 2>/dev/null && return 0
+  return 1
+}
+
+iptables_nat_writable(){
+  command -v iptables >/dev/null 2>&1 || return 1
+  local tp=65530
+  if iptables -t nat -A PREROUTING -p udp --dport "$tp" -j REDIRECT --to-ports "$tp" 2>/dev/null; then
+    iptables -t nat -D PREROUTING -p udp --dport "$tp" -j REDIRECT --to-ports "$tp" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+save_hy2_hop_state(){
+  local mode="$1" base="$2" start="$3" end="$4"
+  cat > "$HY2_HOP_STATE" <<EOF
+mode=${mode}
+base=${base}
+start=${start}
+end=${end}
+EOF
+}
+
+clear_hy2_hop_rules(){
+  [ -f "$HY2_HOP_STATE" ] || return 0
+  # shellcheck disable=SC1090
+  . "$HY2_HOP_STATE" 2>/dev/null || true
+  [ -z "${mode:-}" ] && return 0
+
+  if [ "${mode}" = "iptables" ]; then
+    command -v iptables >/dev/null 2>&1 && iptables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "${base}" 2>/dev/null || true
+    command -v ip6tables >/dev/null 2>&1 && ip6tables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "${base}" 2>/dev/null || true
+  else
+    [ -f "$XRAY_CONF" ] && update_xray 'del(.inbounds[]? | select(.tag|startswith("hy2-in-hop-")))' || true
+  fi
+  rm -f "$HY2_HOP_STATE"
+}
+
+apply_hy2_hop(){
+  local base_port="$1" auth="$2" obfs="$3" domain="$4" crt="$5" key="$6" start="$7" end="$8"
+
+  clear_hy2_hop_rules || true
+  [ -z "$start" ] || [ -z "$end" ] && return 0
+
+  # 无权限/LXC => native多入站
+  if is_lxc_env || ! iptables_nat_writable; then
+    yellow "HY2端口跳跃：检测到LXC/NAT受限，使用应用层多端口监听模式"
+    local p hops='[]'
+    for ((p=start; p<=end; p++)); do
+      [ "$p" -eq "$base_port" ] && continue
+      hops="$(echo "$hops" | jq \
+        --argjson pp "$p" \
+        --arg auth "$auth" \
+        --arg obfs "$obfs" \
+        --arg d "$domain" \
+        --arg crt "$crt" \
+        --arg key "$key" \
+        '. + [{
+          "tag":"hy2-in-hop-"+($pp|tostring),
+          "listen":"::",
+          "port":$pp,
+          "protocol":"hysteria",
+          "settings":{"version":2,"clients":[{"auth":$auth,"email":"hy2@local"}]},
+          "streamSettings":{
+            "network":"hysteria",
+            "security":"tls",
+            "tlsSettings":{
+              "serverName":$d,
+              "alpn":["h3"],
+              "certificates":[{"certificateFile":$crt,"keyFile":$key}]
+            },
+            "hysteriaSettings":{"version":2},
+            "finalmask":{
+              "udp":[{"type":"salamander","settings":{"password":$obfs}}],
+              "quicParams":{
+                "congestion":"bbr",
+                "bbrProfile":"standard",
+                "maxIdleTimeout":30,
+                "keepAlivePeriod":10,
+                "disablePathMTUDiscovery":false
+              }
+            }
+          }
+        }]')"
+    done
+    update_xray --argjson hs "$hops" '.inbounds += $hs'
+    save_hy2_hop_state "native" "$base_port" "$start" "$end"
+  else
+    yellow "HY2端口跳跃：使用iptables REDIRECT模式"
+    iptables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "${base_port}" 2>/dev/null || true
+    command -v ip6tables >/dev/null 2>&1 && ip6tables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "${base_port}" 2>/dev/null || true
+    save_hy2_hop_state "iptables" "$base_port" "$start" "$end"
+  fi
 }
 
 # ========== State ==========
@@ -808,82 +914,126 @@ DOWN=$down
 OBFS=$obfs
 EOF
 }
+
 install_hy2(){
   install_xray || return 1
   ensure_dns_rule || return 1
 
-  local domain token port pass obfs prof up down
+  local domain token port auth obfs prof up down hop hop_start hop_end
   prompt "HY2域名: " domain; [ -z "$domain" ] && { red "域名不能为空"; return 1; }
   prompt "Cloudflare API Token: " token; [ -z "$token" ] && { red "Token不能为空"; return 1; }
 
-  prompt "HY2端口(默认24443): " port; [ -z "$port" ] && port=24443
+  prompt "HY2端口(默认16738): " port; [ -z "$port" ] && port=16738
   [[ "$port" =~ ^[0-9]+$ ]] || { red "端口无效"; return 1; }
 
-  prompt "HY2密码(回车随机UUID): " pass; [ -z "$pass" ] && pass="$(gen_uuid)"
-  prompt "HY2混淆密码(回车随机UUID): " obfs; [ -z "$obfs" ] && obfs="$(gen_uuid)"
+  prompt "HY2认证AUTH(回车随机UUID): " auth; [ -z "$auth" ] && auth="$(gen_uuid)"
+  prompt "HY2混淆密码OBFS(回车随机UUID): " obfs; [ -z "$obfs" ] && obfs="$(gen_uuid)"
 
-  echo "带宽档位: 1.温和(50/100) 2.均衡(100/200) 3.激进(200/500) 4.自定义"
-  prompt "选择(默认1): " prof
+  echo "带宽档位: 1.温和(30/120) 2.均衡(50/250) 3.激进(80/320) 4.自定义"
+  prompt "选择(默认2): " prof
   case "$prof" in
-    2) up=100; down=200 ;;
-    3) up=200; down=500 ;;
+    1) up=30; down=120 ;;
+    3) up=80; down=320 ;;
     4)
-      prompt "上行Mbps(默认100): " up
-      prompt "下行Mbps(默认200): " down
-      [ -z "$up" ] && up=100
-      [ -z "$down" ] && down=200
-      [[ "$up" =~ ^[0-9]+$ ]] || up=100
-      [[ "$down" =~ ^[0-9]+$ ]] || down=200
+      prompt "上行Mbps(默认50): " up
+      prompt "下行Mbps(默认250): " down
+      [ -z "$up" ] && up=50
+      [ -z "$down" ] && down=250
+      [[ "$up" =~ ^[0-9]+$ ]] || up=50
+      [[ "$down" =~ ^[0-9]+$ ]] || down=250
       ;;
-    *) up=50; down=100 ;;
+    *) up=50; down=250 ;;
   esac
+
+  prompt "端口跳跃范围(如20000-20100, 回车关闭): " hop
+  if [[ "${hop:-}" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+    hop_start="${BASH_REMATCH[1]}"
+    hop_end="${BASH_REMATCH[2]}"
+    [ "$hop_start" -gt "$hop_end" ] && { red "跳跃范围无效"; return 1; }
+  else
+    hop_start=""
+    hop_end=""
+  fi
 
   issue_cert_cf "$domain" "$token" || return 1
   open_port "$port" udp
+  if [ -n "$hop_start" ] && [ -n "$hop_end" ]; then
+    open_port "$hop_start" udp || true
+  fi
 
-  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or .protocol=="hysteria2"))'
+  # 删除旧HY2（含hop）
+  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or (.tag|startswith("hy2-in-hop-")) or .protocol=="hysteria" or .protocol=="hysteria2"))'
+  clear_hy2_hop_rules || true
 
   local hy2
   hy2="$(jq -nc \
     --argjson p "$port" \
-    --arg pass "$pass" \
+    --arg auth "$auth" \
     --arg obfs "$obfs" \
     --arg domain "$domain" \
     --arg crt "${TLS_DIR}/${domain}.crt" \
     --arg key "${TLS_DIR}/${domain}.key" \
-    --argjson up "$up" \
-    --argjson down "$down" \
 '{
   "tag":"hy2-in",
   "listen":"::",
   "port":$p,
-  "protocol":"hysteria2",
+  "protocol":"hysteria",
   "settings":{
-    "password":$pass,
-    "obfs":{"type":"salamander","password":$obfs}
+    "version":2,
+    "clients":[{"auth":$auth,"email":"hy2@local"}]
   },
   "streamSettings":{
-    "network":"hy2",
-    "hy2Settings":{"upMbps":$up,"downMbps":$down},
+    "network":"hysteria",
     "security":"tls",
     "tlsSettings":{
       "alpn":["h3"],
       "certificates":[{"certificateFile":$crt,"keyFile":$key}],
       "serverName":$domain
+    },
+    "hysteriaSettings":{"version":2},
+    "finalmask":{
+      "udp":[{"type":"salamander","settings":{"password":$obfs}}],
+      "quicParams":{
+        "congestion":"bbr",
+        "bbrProfile":"standard",
+        "maxIdleTimeout":30,
+        "keepAlivePeriod":10,
+        "disablePathMTUDiscovery":false
+      }
     }
   },
   "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}
 }')"
 
   update_xray --argjson ib "$hy2" '.inbounds += [$ib]'
+
+  # 跳跃应用（iptables / native fallback）
+  apply_hy2_hop "$port" "$auth" "$obfs" "$domain" "${TLS_DIR}/${domain}.crt" "${TLS_DIR}/${domain}.key" "${hop_start:-}" "${hop_end:-}"
+
+  # 配置检查
+  if ! "$XRAY_BIN" run -test -c "$XRAY_CONF" >/tmp/xray_hy2_check.log 2>&1; then
+    red "Xray 配置校验失败"
+    tail -n 80 /tmp/xray_hy2_check.log 2>/dev/null || true
+    return 1
+  fi
+
   svc restart xray
-  write_hy2_state "$port" "$domain" "$pass" "$up" "$down" "$obfs"
+  write_hy2_state "$port" "$domain" "$auth" "$up" "$down" "$obfs"
+  if [ -n "$hop_start" ] && [ -n "$hop_end" ]; then
+    echo "${hop_start}-${hop_end}" > "${WORK}/hy2_hop_range.txt"
+  else
+    rm -f "${WORK}/hy2_hop_range.txt"
+  fi
+
   green "HY2 安装成功（Xray）"
+  green "默认参数: UP=${up} DOWN=${down}, congestion=bbr, bbrProfile=standard"
 }
+
 uninstall_hy2(){
   [ -f "$XRAY_CONF" ] || { red "xray未安装"; return 1; }
-  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or .protocol=="hysteria2"))'
-  rm -f "$HY2_STATE"
+  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or (.tag|startswith("hy2-in-hop-")) or .protocol=="hysteria" or .protocol=="hysteria2"))'
+  clear_hy2_hop_rules || true
+  rm -f "$HY2_STATE" "${WORK}/hy2_hop_range.txt"
   svc restart xray
   green "HY2 已卸载"
 }
@@ -957,9 +1107,14 @@ show_xray_nodes(){
     # shellcheck disable=SC1090
     . "$HY2_STATE" 2>/dev/null || true
     if [ -n "${PORT:-}" ] && [ -n "${DOMAIN:-}" ] && [ -n "${PASS:-}" ] && [ -n "${OBFS:-}" ]; then
-      local hn
+      local hn hop_param=""
       hn="${BASE_FULL} - HY2"
-      purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}#$(url_encode "$hn")"; echo
+      if [ -f "${WORK}/hy2_hop_range.txt" ]; then
+        local hr
+        hr="$(cat "${WORK}/hy2_hop_range.txt" 2>/dev/null || true)"
+        [ -n "$hr" ] && hop_param="&mport=${hr}&ports=${hr}"
+      fi
+      purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}${hop_param}#$(url_encode "$hn")"; echo
       cnt=$((cnt+1))
     fi
   fi
@@ -1581,13 +1736,11 @@ install_shortcut(){
 
   yellow "正在拉取脚本到本地: ${local_script}"
 
-  # 关键修复：最小大小改小，不再用 200000
   if ! smart_download "$local_script" "$url1" 5000; then
     yellow "主地址失败，尝试备用地址..."
     smart_download "$local_script" "$url2" 5000 || { red "拉取失败: $url1"; return 1; }
   fi
 
-  # 权限修复
   chmod 755 "$WORK" 2>/dev/null || true
   chmod 700 "$local_script" 2>/dev/null || chmod +x "$local_script" || true
   chown root:root "$local_script" 2>/dev/null || true
@@ -1812,7 +1965,6 @@ detect_virt_name(){
     echo "CONTAINER"; return
   fi
 
-  # LXC 常见标记
   [ -f /proc/1/ns/mnt ] && [ -d /dev/lxd ] && { echo "LXC"; return; }
 
   echo "UNKNOWN"
