@@ -1127,27 +1127,22 @@ write_tuic_conf(){
     "cache_capacity": 8192
   },
   "inbounds": [
-    {
-      "type":"tuic",
-      "listen":"::",
-      "tag":"tuic-in",
-      "listen_port":${port},
-      "users":[{"uuid":"${uuid}","password":"${uuid}"}],
-      "congestion_control":"${cc}",
-      "sniffing":{
-        "enabled":true,
-        "destOverride":["http","tls","quic"],
-        "metadata_only":false
-      },
-      "tls":{
-        "enabled":true,
-        "server_name":"${domain}",
-        "alpn":["h3"],
-        "certificate_path":"${crt}",
-        "key_path":"${key}"
-      }
+  {
+    "type":"tuic",
+    "listen":"::",
+    "tag":"tuic-in",
+    "listen_port":${port},
+    "users":[{"uuid":"${uuid}","password":"${uuid}"}],
+    "congestion_control":"${cc}",
+    "tls":{
+      "enabled":true,
+      "server_name":"${domain}",
+      "alpn":["h3"],
+      "certificate_path":"${crt}",
+      "key_path":"${key}"
     }
-  ],
+  }
+],
   "outbounds":[
     {"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}},
     {"type":"direct","tag":"direct_ipv6","domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}}
