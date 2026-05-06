@@ -94,9 +94,7 @@ term_cols(){
 
 menu_row2_auto(){
   local lnum="$1" ltxt="$2" rnum="${3:-}" rtxt="${4:-}"
-  local left right i
-  local right_col=42   # 右列固定起始列（你手机屏幕建议 40~44，42最稳）
-
+  local left right
   left="$(printf "%b%2s.%b %s" "$C_NUM" "$lnum" "$C_RST" "$(auto_hl "$ltxt")")"
 
   if [ -z "$rnum" ] || [ -z "$rtxt" ]; then
@@ -106,17 +104,8 @@ menu_row2_auto(){
 
   right="$(printf "%b%2s.%b %s" "$C_NUM" "$rnum" "$C_RST" "$(auto_hl "$rtxt")")"
 
-  # 先输出左列
-  printf "%s" "$left"
-
-  # 补空格直到固定右列起始列（不再受左列每行长度影响）
-  local llen pad
-  llen="$(vlen "$left")"
-  pad=$((right_col - llen))
-  [ "$pad" -lt 1 ] && pad=1
-
-  for ((i=0; i<pad; i++)); do printf " "; done
-  printf "%s\n" "$right"
+  # 不自己算长度，直接固定占位输出
+  printf "%-36b %b\n" "$left" "$right"
 }
 
 menu_item_auto(){
