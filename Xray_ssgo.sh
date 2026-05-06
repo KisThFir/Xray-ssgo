@@ -74,8 +74,11 @@ RESTART_HOURS=0
 XHTTP_MODE="auto"
 XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPaddingPlacement":"queryInHeader","xPaddingHeader":"y2k","xPaddingKey":"_y2k"}'
 
-YOUTUBE_V6=0
-V6_SITE_LIST=""
+# YouTube 模式：0=关闭 1=兼容(优先v6可回落) 2=严格(禁v4回落)
+YOUTUBE_MODE=0
+# 手动域名列表：逗号分隔
+V6_COMPAT_SITES=""
+V6_STRICT_SITES=""
 
 IP_CHECKED=0
 IP_CACHE_MTIME=0
@@ -179,7 +182,7 @@ detect_cloudflared_arch(){
     *) echo "" ;;
   esac
 }
-# 关键修复：Alpine 用 musl 包
+# Alpine 用 musl 包
 detect_singbox_suffix(){
   case "$(uname -m)" in
     x86_64|amd64)
@@ -248,16 +251,18 @@ load_state(){
     [[ "$RESTART_HOURS" =~ ^[0-9]+$ ]] || RESTART_HOURS=0
   fi
   if [ -f "$OUTBOUND_CONF" ]; then
-    YOUTUBE_V6="$(awk -F= '/^YOUTUBE_V6=/{print $2}' "$OUTBOUND_CONF" 2>/dev/null)"
-    V6_SITE_LIST="$(awk -F= '/^V6_SITES=/{sub(/^V6_SITES=/,""); print}' "$OUTBOUND_CONF" 2>/dev/null)"
-    [[ "$YOUTUBE_V6" =~ ^[01]$ ]] || YOUTUBE_V6=0
+    YOUTUBE_MODE="$(awk -F= '/^YOUTUBE_MODE=/{print $2}' "$OUTBOUND_CONF" 2>/dev/null)"
+    V6_COMPAT_SITES="$(awk -F= '/^V6_COMPAT_SITES=/{sub(/^V6_COMPAT_SITES=/,""); print}' "$OUTBOUND_CONF" 2>/dev/null)"
+    V6_STRICT_SITES="$(awk -F= '/^V6_STRICT_SITES=/{sub(/^V6_STRICT_SITES=/,""); print}' "$OUTBOUND_CONF" 2>/dev/null)"
+    [[ "$YOUTUBE_MODE" =~ ^[012]$ ]] || YOUTUBE_MODE=0
   fi
 }
 save_outbound(){
   mkdir -p "$WORK"
   {
-    echo "YOUTUBE_V6=${YOUTUBE_V6}"
-    echo "V6_SITES=${V6_SITE_LIST}"
+    echo "YOUTUBE_MODE=${YOUTUBE_MODE}"
+    echo "V6_COMPAT_SITES=${V6_COMPAT_SITES}"
+    echo "V6_STRICT_SITES=${V6_STRICT_SITES}"
   } > "$OUTBOUND_CONF"
 }
 
@@ -272,6 +277,8 @@ country_flag(){
 }
 clean_isp(){
   local s="$1"
+  # 去除前缀 AS12345 / ASAS12345 等异常样式
+  s="$(echo "$s" | sed -E 's/^AS(AS)?[0-9]+[[:space:]]+//I')"
   s="${s#AS[0-9]* }"
   s="$(echo "$s" | sed -E 's/[[:space:],]+$//; s/^[[:space:],]+//')"
   s="$(echo "$s" | sed -E 's/[[:space:]]+(LLC|Inc\.?|Ltd\.?|Corp\.?|Limited|Company|GmbH|SAS|PLC|Co\.?)$//I')"
@@ -304,14 +311,14 @@ load_ip_cache(){
 apply_base_name(){
   local cc isp emo
   if [ -n "$COUNTRY4" ] || [ -n "$ISP4" ]; then
-    cc="$COUNTRY4"; isp="$ISP4"; emo="$EMOJI4"
+    cc="${COUNTRY4^^}"; isp="$ISP4"; emo="$EMOJI4"
   else
-    cc="$COUNTRY6"; isp="$ISP6"; emo="$EMOJI6"
+    cc="${COUNTRY6^^}"; isp="$ISP6"; emo="$EMOJI6"
   fi
   if [ -n "$emo" ] && [ -n "$cc" ]; then
-    BASE_REGION="${emo} [${cc}]"
+    BASE_REGION="${emo} ${cc}"
   elif [ -n "$cc" ]; then
-    BASE_REGION="[${cc}]"
+    BASE_REGION="${cc}"
   else
     BASE_REGION="Node"
   fi
@@ -348,11 +355,11 @@ fill_by_ipinfo_ip(){
     org="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/org" 2>/dev/null || true)"
     cc="$(curl -sf --max-time 5 "https://ipinfo.io/${ip}/country" 2>/dev/null || true)"
     if [ "$fam" = "4" ]; then
-      WAN4="$ip"; COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+      WAN4="$ip"; COUNTRY4="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
       EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
       ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
     else
-      WAN6="$ip"; COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+      WAN6="$ip"; COUNTRY6="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
       EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
       ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
     fi
@@ -363,12 +370,12 @@ fill_by_ipinfo_ip(){
   org="$(echo "$j" | jq -r '.org // empty' 2>/dev/null || true)"
   if [ "$fam" = "4" ]; then
     WAN4="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
-    COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+    COUNTRY4="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
     EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
     ISP4="$(clean_isp "$org")"; [ -z "$ISP4" ] && ISP4="unknown"
   else
     WAN6="$(echo "$j" | jq -r '.ip // empty' 2>/dev/null || true)"
-    COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+    COUNTRY6="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
     EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
     ISP6="$(clean_isp "$org")"; [ -z "$ISP6" ] && ISP6="unknown"
   fi
@@ -388,18 +395,17 @@ parse_cf_json(){
   [ -z "$ip" ] && return 1
 
   if [ "$fam" = "4" ]; then
-    WAN4="$ip"; COUNTRY4="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+    WAN4="$ip"; COUNTRY4="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
     EMOJI4="$emo"; [ -z "$EMOJI4" ] && EMOJI4="$(country_flag "$cc" 2>/dev/null || true)"
     ISP4="$(clean_isp "${asn:+AS${asn} }${isp}")"; [ -z "$ISP4" ] && ISP4="$(clean_isp "$isp")"; [ -z "$ISP4" ] && ISP4="unknown"
   else
-    WAN6="$ip"; COUNTRY6="$(echo "$cc" | tr '[:upper:]' '[:lower:]')"
+    WAN6="$ip"; COUNTRY6="$(echo "$cc" | tr '[:lower:]' '[:upper:]')"
     EMOJI6="$emo"; [ -z "$EMOJI6" ] && EMOJI6="$(country_flag "$cc" 2>/dev/null || true)"
     ISP6="$(clean_isp "${asn:+AS${asn} }${isp}")"; [ -z "$ISP6" ] && ISP6="$(clean_isp "$isp")"; [ -z "$ISP6" ] && ISP6="unknown"
   fi
   return 0
 }
 
-# v6 本地兜底：先 route src，再 global 地址
 get_local_ipv6_fallback(){
   local ip6=""
   ip6="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
@@ -422,7 +428,6 @@ check_ip(){
     [ -z "$L4" ] && L4="$(ip -4 addr show "$IF4" 2>/dev/null | awk '/inet / && /global/ {print $2}' | awk -F/ '{print $1}' | head -n1 || true)"
   fi
 
-  # v4 走 cloudflare.now.cc
   local j4=""
   if [ -n "${L4:-}" ]; then
     j4="$(curl -4 -sk --interface "$L4" --connect-timeout 2 --max-time 3 "https://ip.cloudflare.now.cc?lang=zh-CN" 2>/dev/null || true)"
@@ -431,14 +436,12 @@ check_ip(){
   fi
   parse_cf_json 4 "$j4" || true
 
-  # v4 回退
   if [ -z "${WAN4:-}" ]; then
     local ip4=""
     ip4="$(curl -4 -sf --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     [ -n "$ip4" ] && fill_by_ipinfo_ip 4 "$ip4" || true
   fi
 
-  # v6 独立：优先 api64.ipify.org
   local ip6=""
   ip6="$(curl -6 -sf --max-time 6 https://api64.ipify.org 2>/dev/null || true)"
   if [ -n "$ip6" ]; then
@@ -452,7 +455,6 @@ check_ip(){
     fi
   fi
 
-  # 双栈都失败再兜底
   if [ -z "${WAN4:-}" ] && [ -z "${WAN6:-}" ]; then
     local rip=""
     rip="$(platform_get_realip 2>/dev/null || true)"
@@ -581,13 +583,15 @@ normalize_domain_item(){
   s="$(echo "$s" | tr '[:upper:]' '[:lower:]' | sed 's/^ *//;s/ *$//;s/^\.*//')"
   echo "$s"
 }
-
-build_v6_domains_json(){
-  local d="" raw_arr=() clean_arr=() item
-  [ "$YOUTUBE_V6" = "1" ] && d="youtube.com,youtu.be,googlevideo.com,ytimg.com"
-  if [ -n "$V6_SITE_LIST" ]; then
-    [ -n "$d" ] && d="${d},${V6_SITE_LIST}" || d="$V6_SITE_LIST"
-  fi
+merge_csv(){
+  local a="$1" b="$2"
+  if [ -z "$a" ]; then echo "$b"; return; fi
+  if [ -z "$b" ]; then echo "$a"; return; fi
+  echo "${a},${b}"
+}
+csv_to_json_unique(){
+  local d="$1"
+  local raw_arr=() clean_arr=() item
   IFS=',' read -r -a raw_arr <<< "$d"
   for item in "${raw_arr[@]}"; do
     item="$(normalize_domain_item "$item")"
@@ -596,34 +600,59 @@ build_v6_domains_json(){
   done
   printf '%s\n' "${clean_arr[@]}" | awk 'NF' | sort -u | jq -Rsc 'split("\n")|map(select(length>0))'
 }
+yt_domains_csv(){
+  echo "youtube.com,youtu.be,googlevideo.com,ytimg.com"
+}
+build_v6_compat_domains_json(){
+  local d="$V6_COMPAT_SITES"
+  [ "$YOUTUBE_MODE" = "1" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
+  csv_to_json_unique "$d"
+}
+build_v6_strict_domains_json(){
+  local d="$V6_STRICT_SITES"
+  [ "$YOUTUBE_MODE" = "2" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
+  csv_to_json_unique "$d"
+}
 
 apply_policy_xray(){
   [ -f "$XRAY_CONF" ] || return 0
   ensure_dns_rule
   update_xray '
     .outbounds |= (
-      map(select(.tag!="direct" and .tag!="direct-v4" and .tag!="direct-v6"))
+      map(select(.tag!="direct" and .tag!="direct-v4" and .tag!="direct-v6" and .tag!="block-v4"))
       + [{"protocol":"freedom","tag":"direct-v4","settings":{"domainStrategy":"UseIPv4"}}]
       + [{"protocol":"freedom","tag":"direct-v6","settings":{"domainStrategy":"UseIPv6"}}]
+      + [{"protocol":"blackhole","tag":"block-v4"}]
     )'
-  update_xray 'del(.routing.rules[]? | select(.tag=="v6-route-rule"))'
-  local arr
-  arr="$(build_v6_domains_json)"
-  if [ "$(echo "$arr" | jq 'length')" -gt 0 ]; then
-    update_xray --argjson d "$arr" '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-route-rule"}]'
+
+  update_xray 'del(.routing.rules[]? | select(.tag=="v6-compat-rule" or .tag=="v6-strict-route-rule" or .tag=="v6-strict-reject-rule"))'
+
+  local compat strict
+  compat="$(build_v6_compat_domains_json)"
+  strict="$(build_v6_strict_domains_json)"
+
+  # 严格：先拒绝 IPv4 目的，再路由 IPv6
+  if [ "$(echo "$strict" | jq 'length')" -gt 0 ]; then
+    update_xray --argjson d "$strict" \
+      '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"ip":["0.0.0.0/0"],"outboundTag":"block-v4","tag":"v6-strict-reject-rule"}]'
+    update_xray --argjson d "$strict" \
+      '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-strict-route-rule"}]'
+  fi
+
+  # 兼容：仅路由 IPv6，不 reject IPv4
+  if [ "$(echo "$compat" | jq 'length')" -gt 0 ]; then
+    update_xray --argjson d "$compat" \
+      '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-compat-rule"}]'
   fi
 }
 
-# v1.13.11 兼容严格策略:
-# - match 域名后，先拒绝 IPv4 回落，再路由 direct_ipv6
-# - 首条 sniff
 apply_policy_sbox(){
   [ -f "$SB_CONF" ] || return 0
 
-  local arr
-  arr="$(build_v6_domains_json)"
+  local compat strict
+  compat="$(build_v6_compat_domains_json)"
+  strict="$(build_v6_strict_domains_json)"
 
-  # 1) 确保 outbounds 存在 direct_ipv4 / direct_ipv6（保留其它 outbound）
   jq '
     .outbounds |= (
       map(select(.tag!="direct_ipv4" and .tag!="direct_ipv6"))
@@ -640,28 +669,21 @@ apply_policy_sbox(){
     )
   ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
 
-  # 2) 重建 route / dns（严格模式）
-  if [ "$(echo "$arr" | jq 'length')" -gt 0 ]; then
-    jq --argjson d "$arr" '
-      .dns = (.dns // {})
-      | .dns.rules = [{"domain_suffix":$d,"server":"dns_cf"}]
-      | .route = (.route // {})
-      | .route.rules = [
-          {"action":"sniff"},
-          {"domain_suffix":$d,"ip_version":4,"action":"reject","method":"default"},
-          {"domain_suffix":$d,"action":"route","outbound":"direct_ipv6"}
-        ]
-      | .route.final = "direct_ipv4"
-    ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
-  else
-    jq '
-      .dns = (.dns // {})
-      | .dns.rules = []
-      | .route = (.route // {})
-      | .route.rules = [{"action":"sniff"}]
-      | .route.final = "direct_ipv4"
-    ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
-  fi
+  jq --argjson c "$compat" --argjson s "$strict" '
+    .dns = (.dns // {})
+    | .dns.rules = (
+        (if ($s|length)>0 then [{"domain_suffix":$s,"server":"dns_cf"}] else [] end)
+        + (if ($c|length)>0 then [{"domain_suffix":$c,"server":"dns_cf"}] else [] end)
+      )
+    | .route = (.route // {})
+    | .route.rules = (
+        [{"action":"sniff"}]
+        + (if ($s|length)>0 then [{"domain_suffix":$s,"ip_version":4,"action":"reject","method":"default"}] else [] end)
+        + (if ($s|length)>0 then [{"domain_suffix":$s,"action":"route","outbound":"direct_ipv6"}] else [] end)
+        + (if ($c|length)>0 then [{"domain_suffix":$c,"action":"route","outbound":"direct_ipv6"}] else [] end)
+      )
+    | .route.final = "direct_ipv4"
+  ' "$SB_CONF" > "${SB_CONF}.tmp" && mv "${SB_CONF}.tmp" "$SB_CONF"
 }
 
 apply_policy_all(){
@@ -682,13 +704,6 @@ apply_policy_all(){
 }
 
 # ========== Argo ==========
-ask_youtube_v6_once(){
-  local a
-  prompt "是否启用 YouTube IPv6 出站? (y/N): " a
-  case "$a" in y|Y) YOUTUBE_V6=1 ;; *) YOUTUBE_V6=0 ;; esac
-  save_outbound
-  apply_policy_all || true
-}
 install_argo(){
   install_xray || return 1
   ensure_dns_rule || return 1
@@ -783,7 +798,6 @@ EOF
 
   svc restart xray
   svc restart "$svcname"
-  ask_youtube_v6_once
   apply_policy_all || true
   green "Argo 配置完成"
 }
@@ -818,9 +832,9 @@ show_xray_nodes(){
     local d xextra nx nw ns
     d="$(cat "$ARGO_DOMAIN")"
     xextra="$(url_encode "$XHTTP_EXTRA_JSON")"
-    nx="${BASE_FULL} - Argo - Xhttp"
-    nw="${BASE_FULL} - Argo - Ws"
-    ns="${BASE_FULL} - Argo - Ss"
+    nx="${BASE_FULL} - ArgoXHTTP"
+    nw="${BASE_FULL} - ArgoWS"
+    ns="${BASE_FULL} - ArgoSS"
     purple "vless://${uuid}@${CFIP}:443?encryption=none&security=tls&sni=${d}&alpn=h2&fp=chrome&type=xhttp&host=${d}&path=%2Fxgo&mode=${XHTTP_MODE}&extra=${xextra}#$(url_encode "$nx")"; echo
     purple "vless://${uuid}@${CFIP}:443?encryption=none&security=tls&sni=${d}&fp=chrome&type=ws&host=${d}&path=%2Fargo%3Fed%3D2560#$(url_encode "$nw")"; echo
     cnt=$((cnt+2))
@@ -1099,21 +1113,26 @@ build_sbox_dns_servers_json(){
 write_tuic_conf(){
   local domain="$1" port="$2" cc="$3" uuid="$4"
   local crt="${TLS_DIR}/${domain}.crt" key="${TLS_DIR}/${domain}.key"
-  local v6_arr dns_servers dns_rules_json route_rules_json
-  v6_arr="$(build_v6_domains_json)"
+  local v6_compat v6_strict dns_servers dns_rules_json route_rules_json
+  v6_compat="$(build_v6_compat_domains_json)"
+  v6_strict="$(build_v6_strict_domains_json)"
   dns_servers="$(build_sbox_dns_servers_json)"
 
-  if [ "$(echo "$v6_arr" | jq 'length')" -gt 0 ]; then
-    dns_rules_json="$(jq -nc --argjson d "$v6_arr" '[{"domain_suffix":$d,"server":"dns_cf"}]')"
-    route_rules_json="$(jq -nc --argjson d "$v6_arr" '[
-      {"action":"sniff"},
-      {"domain_suffix":$d,"ip_version":4,"action":"reject","method":"default"},
-      {"domain_suffix":$d,"action":"route","outbound":"direct_ipv6"}
-    ]')"
-  else
-    dns_rules_json='[]'
-    route_rules_json='[{"action":"sniff"}]'
-  fi
+  dns_rules_json="$(jq -nc --argjson c "$v6_compat" --argjson s "$v6_strict" '
+    (if ($s|length)>0 then [{"domain_suffix":$s,"server":"dns_cf"}] else [] end)
+    +
+    (if ($c|length)>0 then [{"domain_suffix":$c,"server":"dns_cf"}] else [] end)
+  ')"
+
+  route_rules_json="$(jq -nc --argjson c "$v6_compat" --argjson s "$v6_strict" '
+    [{"action":"sniff"}]
+    +
+    (if ($s|length)>0 then [{"domain_suffix":$s,"ip_version":4,"action":"reject","method":"default"}] else [] end)
+    +
+    (if ($s|length)>0 then [{"domain_suffix":$s,"action":"route","outbound":"direct_ipv6"}] else [] end)
+    +
+    (if ($c|length)>0 then [{"domain_suffix":$c,"action":"route","outbound":"direct_ipv6"}] else [] end)
+  ')"
 
   cat > "$SB_CONF" <<EOF
 {
@@ -1127,22 +1146,22 @@ write_tuic_conf(){
     "cache_capacity": 8192
   },
   "inbounds": [
-  {
-    "type":"tuic",
-    "listen":"::",
-    "tag":"tuic-in",
-    "listen_port":${port},
-    "users":[{"uuid":"${uuid}","password":"${uuid}"}],
-    "congestion_control":"${cc}",
-    "tls":{
-      "enabled":true,
-      "server_name":"${domain}",
-      "alpn":["h3"],
-      "certificate_path":"${crt}",
-      "key_path":"${key}"
+    {
+      "type":"tuic",
+      "listen":"::",
+      "tag":"tuic-in",
+      "listen_port":${port},
+      "users":[{"uuid":"${uuid}","password":"${uuid}"}],
+      "congestion_control":"${cc}",
+      "tls":{
+        "enabled":true,
+        "server_name":"${domain}",
+        "alpn":["h3"],
+        "certificate_path":"${crt}",
+        "key_path":"${key}"
+      }
     }
-  }
-],
+  ],
   "outbounds":[
     {"type":"direct","tag":"direct_ipv4","domain_resolver":{"server":"dns_cf","strategy":"ipv4_only"}},
     {"type":"direct","tag":"direct_ipv6","domain_resolver":{"server":"dns_cf","strategy":"ipv6_only"}}
@@ -1152,7 +1171,6 @@ write_tuic_conf(){
 EOF
 }
 
-# 修复版 OpenRC 脚本（stop/restart 更干净）
 ensure_tuic_service(){
   if service_exists tuic-box; then return; fi
   if is_alpine; then
@@ -1194,7 +1212,6 @@ stop() {
     start-stop-daemon --stop --pidfile "\${PIDFILE}" --retry TERM/20/KILL/5 >/dev/null 2>&1 || true
   fi
 
-  # fallback: 防 pidfile 丢失/错乱
   pkill -f "^\${SINGBOX_BIN} run -c \${SINGBOX_CFG}\$" >/dev/null 2>&1 || true
   pkill -x sing-box >/dev/null 2>&1 || true
 
@@ -1260,7 +1277,6 @@ install_tuic(){
   write_tuic_conf "$domain" "$port" "$cc" "$uuid"
   ensure_tuic_service
 
-  ask_youtube_v6_once
   apply_policy_sbox || true
 
   start_tuic_check || return 1
@@ -1291,7 +1307,7 @@ uninstall_tuic(){
   green "Sbox 已卸载"
 }
 
-# 新增：前台查看 sing-box 日志（Ctrl+C 后恢复后台）
+# 前台查看 sing-box 日志（DEBUG）
 foreground_sbox_log(){
   [ -x "$SB_BIN" ] || { red "sing-box 未安装"; pause; return 1; }
   [ -f "$SB_CONF" ] || { red "缺少配置: $SB_CONF"; pause; return 1; }
@@ -1299,7 +1315,6 @@ foreground_sbox_log(){
   local bak="${SB_CONF}.bak.fg.$(date +%s)"
   cp -a "$SB_CONF" "$bak"
 
-  # 临时改成 DEBUG（显示 sniff / route match 等细节）
   if ! jq '.log.disabled=false | .log.level="debug" | .log.timestamp=true' \
       "$SB_CONF" > "${SB_CONF}.tmp"; then
     red "写入 DEBUG 日志配置失败"
@@ -1327,7 +1342,6 @@ foreground_sbox_log(){
   green "前台 DEBUG 日志已启动（Ctrl+C 退出）"
   echo "日志文件: /tmp/sb-live.log"
 
-  # 临时覆盖全局 INT trap，避免 Ctrl+C 直接退出整个管理脚本
   local old_int_trap
   old_int_trap="$(trap -p INT || true)"
   trap ':' INT
@@ -1336,14 +1350,12 @@ foreground_sbox_log(){
   "$SB_BIN" run -c "$SB_CONF" 2>&1 | tee /tmp/sb-live.log
   set -e
 
-  # 恢复原 INT trap
   if [ -n "$old_int_trap" ]; then
     eval "$old_int_trap"
   else
     trap - INT
   fi
 
-  # 恢复原配置（回到 info）
   cp -f "$bak" "$SB_CONF"
   rm -f "$bak"
 
@@ -1354,6 +1366,75 @@ foreground_sbox_log(){
     green "tuic-box 已恢复后台运行"
   else
     red "tuic-box 恢复失败，请手动检查"
+  fi
+  pause
+}
+
+# 新增：前台查看 xray 日志（DEBUG）
+foreground_xray_log(){
+  [ -x "$XRAY_BIN" ] || { red "xray 未安装"; pause; return 1; }
+  [ -f "$XRAY_CONF" ] || { red "缺少配置: $XRAY_CONF"; pause; return 1; }
+
+  local bak="${XRAY_CONF}.bak.fg.$(date +%s)"
+  cp -a "$XRAY_CONF" "$bak"
+
+  # 为了前台可见，临时把 access/error 输出到 stdout（空字符串）+ debug
+  if ! jq '
+      .log = (.log // {})
+      | .log.access = ""
+      | .log.error = ""
+      | .log.loglevel = "debug"
+      | .log.dnsLog = true
+    ' "$XRAY_CONF" > "${XRAY_CONF}.tmp"; then
+    red "写入 Xray DEBUG 日志配置失败"
+    rm -f "${XRAY_CONF}.tmp" "$bak"
+    pause
+    return 1
+  fi
+  mv "${XRAY_CONF}.tmp" "$XRAY_CONF"
+
+  if ! "$XRAY_BIN" run -test -c "$XRAY_CONF" >/tmp/xray_check_fg.log 2>&1; then
+    red "Xray 配置校验失败，无法前台运行"
+    cp -f "$bak" "$XRAY_CONF"
+    rm -f "$bak"
+    tail -n 80 /tmp/xray_check_fg.log 2>/dev/null || true
+    pause
+    return 1
+  fi
+
+  yellow "即将停止 xray 后台服务并前台输出 DEBUG 日志..."
+  svc stop xray || true
+  pkill -f "^${XRAY_BIN} run -c ${XRAY_CONF}$" >/dev/null 2>&1 || true
+  pkill -x xray >/dev/null 2>&1 || true
+  sleep 1
+
+  green "前台 DEBUG 日志已启动（Ctrl+C 退出）"
+  echo "日志文件: /tmp/xray-live.log"
+
+  local old_int_trap
+  old_int_trap="$(trap -p INT || true)"
+  trap ':' INT
+
+  set +e
+  "$XRAY_BIN" run -c "$XRAY_CONF" 2>&1 | tee /tmp/xray-live.log
+  set -e
+
+  if [ -n "$old_int_trap" ]; then
+    eval "$old_int_trap"
+  else
+    trap - INT
+  fi
+
+  cp -f "$bak" "$XRAY_CONF"
+  rm -f "$bak"
+
+  yellow "已退出前台日志，正在恢复后台服务..."
+  svc start xray || true
+  sleep 1
+  if is_running xray; then
+    green "xray 已恢复后台运行"
+  else
+    red "xray 恢复失败，请手动检查"
   fi
   pause
 }
@@ -1516,41 +1597,63 @@ full_uninstall(){
 }
 
 # ========== Menus ==========
+yt_mode_str(){
+  case "$YOUTUBE_MODE" in
+    0) echo "关闭" ;;
+    1) echo "兼容" ;;
+    2) echo "严格" ;;
+    *) echo "关闭" ;;
+  esac
+}
 manage_outbound_menu(){
   while true; do
     cls
     local yst
-    [ "$YOUTUBE_V6" = "1" ] && yst="\033[1;32m已开启\033[0m" || yst="\033[1;91m未开启\033[0m"
+    yst="$(yt_mode_str)"
     echo -e "${C_OUTBOUND}========== 出站管理（Xray + Sbox）==========${C_RST}"
     echo -e "默认出站: \033[1;36mIPv4\033[0m"
-    echo -e "YouTube IPv6: ${yst}"
-    echo -e "IPv6规则: \033[1;36m${V6_SITE_LIST:-（空）}\033[0m"
+    echo -e "YouTube模式: \033[1;36m${yst}\033[0m"
+    echo -e "IPv6兼容规则: \033[1;36m${V6_COMPAT_SITES:-（空）}\033[0m"
+    echo -e "IPv6严格规则: \033[1;36m${V6_STRICT_SITES:-（空）}\033[0m"
     echo "-----------------------------------------------"
-    echo -e "\033[1;32m 1.\033[0m \033[1;32m开启\033[0m${C_OUTBOUND}YouTube IPv6出站${C_RST}"
-    echo -e "\033[1;36m 2.\033[0m \033[1;36m添加\033[0m${C_OUTBOUND}IPv6出站规则${C_RST}"
-    echo -e "\033[1;91m 3.\033[0m \033[1;91m删除\033[0m${C_OUTBOUND}IPv6出站规则${C_RST}"
-    echo -e "${C_BAD} 4.${C_RST} ${C_BAD}重启${C_RST}${C_OUTBOUND}服务应用规则${C_RST}"
+    echo -e "\033[1;32m 1.\033[0m 设置YouTube模式（0关闭/1兼容/2严格）"
+    echo -e "\033[1;36m 2.\033[0m 添加IPv6兼容规则"
+    echo -e "\033[1;36m 3.\033[0m 添加IPv6严格规则"
+    echo -e "\033[1;91m 4.\033[0m 删除IPv6兼容规则"
+    echo -e "\033[1;91m 5.\033[0m 删除IPv6严格规则"
+    echo -e "${C_BAD} 6.${C_RST} ${C_BAD}重启${C_RST}${C_OUTBOUND}服务应用规则${C_RST}"
     echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
     echo "==============================================="
     prompt "请选择: " c
     case "$c" in
-      1) YOUTUBE_V6=1; save_outbound; apply_policy_all; green "已开启并应用"; pause ;;
+      1)
+        prompt "输入模式(0/1/2): " m
+        [[ "$m" =~ ^[012]$ ]] || { red "输入无效"; pause; continue; }
+        YOUTUBE_MODE="$m"; save_outbound; apply_policy_all; green "YouTube模式已更新并应用"; pause
+        ;;
       2)
         prompt "输入域名(逗号分隔): " s
         [ -z "$s" ] && { red "不能为空"; pause; continue; }
-        [ -z "$V6_SITE_LIST" ] && V6_SITE_LIST="$s" || V6_SITE_LIST="${V6_SITE_LIST},${s}"
-        V6_SITE_LIST="$(echo "$V6_SITE_LIST" | sed 's/,,*/,/g; s/^,//; s/,$//')"
-        save_outbound; apply_policy_all; green "已添加并应用"; pause
+        [ -z "$V6_COMPAT_SITES" ] && V6_COMPAT_SITES="$s" || V6_COMPAT_SITES="${V6_COMPAT_SITES},${s}"
+        V6_COMPAT_SITES="$(echo "$V6_COMPAT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
+        save_outbound; apply_policy_all; green "已添加兼容规则并应用"; pause
         ;;
       3)
-        if [ -z "$V6_SITE_LIST" ]; then red "规则为空"; pause; continue; fi
+        prompt "输入域名(逗号分隔): " s
+        [ -z "$s" ] && { red "不能为空"; pause; continue; }
+        [ -z "$V6_STRICT_SITES" ] && V6_STRICT_SITES="$s" || V6_STRICT_SITES="${V6_STRICT_SITES},${s}"
+        V6_STRICT_SITES="$(echo "$V6_STRICT_SITES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
+        save_outbound; apply_policy_all; green "已添加严格规则并应用"; pause
+        ;;
+      4)
+        if [ -z "$V6_COMPAT_SITES" ]; then red "规则为空"; pause; continue; fi
         local arr i=1
-        IFS=',' read -r -a arr <<< "$V6_SITE_LIST"
-        echo "当前规则："
+        IFS=',' read -r -a arr <<< "$V6_COMPAT_SITES"
+        echo "当前兼容规则："
         for d in "${arr[@]}"; do d="$(echo "$d" | sed 's/^ *//; s/ *$//')"; [ -z "$d" ] && continue; echo "  $i. $d"; i=$((i+1)); done
         echo "  a. 全部删除"; echo "  0. 取消"
         prompt "请输入序号或a: " idx
-        if [[ "$idx" =~ ^[aA]$ ]]; then V6_SITE_LIST=""; save_outbound; apply_policy_all; green "已全删并应用"; pause; continue; fi
+        if [[ "$idx" =~ ^[aA]$ ]]; then V6_COMPAT_SITES=""; save_outbound; apply_policy_all; green "已全删并应用"; pause; continue; fi
         if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -le 0 ] || [ "$idx" -ge "$i" ]; then [ "$idx" = "0" ] && continue; red "序号无效"; pause; continue; fi
         local new="" j=1
         for d in "${arr[@]}"; do
@@ -1558,9 +1661,27 @@ manage_outbound_menu(){
           [ "$j" -ne "$idx" ] && { [ -z "$new" ] && new="$d" || new="${new},${d}"; }
           j=$((j+1))
         done
-        V6_SITE_LIST="$new"; save_outbound; apply_policy_all; green "已删除并应用"; pause
+        V6_COMPAT_SITES="$new"; save_outbound; apply_policy_all; green "已删除并应用"; pause
         ;;
-      4) apply_policy_all; pause ;;
+      5)
+        if [ -z "$V6_STRICT_SITES" ]; then red "规则为空"; pause; continue; fi
+        local arr2 i2=1
+        IFS=',' read -r -a arr2 <<< "$V6_STRICT_SITES"
+        echo "当前严格规则："
+        for d in "${arr2[@]}"; do d="$(echo "$d" | sed 's/^ *//; s/ *$//')"; [ -z "$d" ] && continue; echo "  $i2. $d"; i2=$((i2+1)); done
+        echo "  a. 全部删除"; echo "  0. 取消"
+        prompt "请输入序号或a: " idx2
+        if [[ "$idx2" =~ ^[aA]$ ]]; then V6_STRICT_SITES=""; save_outbound; apply_policy_all; green "已全删并应用"; pause; continue; fi
+        if ! [[ "$idx2" =~ ^[0-9]+$ ]] || [ "$idx2" -le 0 ] || [ "$idx2" -ge "$i2" ]; then [ "$idx2" = "0" ] && continue; red "序号无效"; pause; continue; fi
+        local new2="" j2=1
+        for d in "${arr2[@]}"; do
+          d="$(echo "$d" | sed 's/^ *//; s/ *$//')"; [ -z "$d" ] && continue
+          [ "$j2" -ne "$idx2" ] && { [ -z "$new2" ] && new2="$d" || new2="${new2},${d}"; }
+          j2=$((j2+1))
+        done
+        V6_STRICT_SITES="$new2"; save_outbound; apply_policy_all; green "已删除并应用"; pause
+        ;;
+      6) apply_policy_all; pause ;;
       0) return ;;
       *) red "无效"; pause ;;
     esac
@@ -1588,8 +1709,8 @@ xray_menu(){
     echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_ARGO}Argo${C_RST}              ${C_VIEW} 6.${C_RST} ${C_VIEW}查看${C_RST}${C_NODE}节点${C_RST}"
     echo -e "${C_RESTART} 8.${C_RST} ${C_RESTART}重启${C_RST}${C_XRAY}Xray${C_RST}              ${C_MODIFY} 5.${C_RST} ${C_MODIFY}修改${C_RST}${C_UUID}UUID${C_RST}"
     echo -e "${C_RESTART} 7.${C_RST} ${C_RESTART}重启${C_RST}${C_ARGO}Argo${C_RST}              ${C_MANAGE} 3.${C_RST} ${C_MANAGE}管理${C_RST}${C_SOCKS5}Socks5${C_RST}"
-    echo -e "${C_BAD} 9.${C_RST} ${C_BAD}卸载${C_RST}${C_XRAY}Xray${C_RST}              ${C_MANAGE} 4.${C_RST} ${C_MANAGE}管理${C_RST}${C_FREEFLOW}免流${C_RST}"
-    echo -e "${C_BAD} 2.${C_RST} ${C_BAD}卸载${C_RST}${C_ARGO}Argo${C_RST}              ${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
+    echo -e "${C_RESTART} 10.${C_RST} ${C_VIEW}实时${C_RST}${C_RESTART}日志${C_RST}${C_XRAY}(DEBUG)${C_RST}       ${C_MANAGE} 4.${C_RST} ${C_MANAGE}管理${C_RST}${C_FREEFLOW}免流${C_RST}"
+    echo -e "${C_BAD} 9.${C_RST} ${C_BAD}卸载${C_RST}${C_XRAY}Xray${C_RST}              ${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
     echo "==============================================="
     prompt "请选择: " c
     case "$c" in
@@ -1609,6 +1730,7 @@ xray_menu(){
         command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
         green "Xray已卸载"; pause
         ;;
+      10) foreground_xray_log ;;
       0) return ;;
       *) red "无效"; pause ;;
     esac
@@ -1630,7 +1752,7 @@ sbox_menu(){
     echo -e "${C_INSTALL} 1.${C_RST} ${C_INSTALL}安装${C_RST}${C_TUIC}Tuic${C_RST}"
     echo -e "${C_VIEW} 2.${C_RST} ${C_VIEW}查看${C_RST}${C_NODE}节点${C_RST}"
     echo -e "${C_RESTART} 3.${C_RST} ${C_RESTART}重启${C_RST}${C_TUIC}Tuic${C_RST}"
-    echo -e "${C_RESTART} 5.${C_RST} ${C_VIEW}实时${C_RST}${C_RESTART}日志${C_RST}"
+    echo -e "${C_RESTART} 5.${C_RST} ${C_VIEW}实时${C_RST}${C_RESTART}日志${C_RST}(DEBUG)"
     echo -e "${C_BAD} 4.${C_RST} ${C_BAD}卸载${C_RST}${C_TUIC}Tuic${C_RST}"
     echo -e "${C_BAD} 0.${C_RST} ${C_BAD}返回${C_RST}"
     echo "==============================================="
@@ -1712,8 +1834,16 @@ main_menu(){
     info="$(sys_info)"
     mem="$(mem_used_disp)"
 
-    if [ -n "$WAN4" ]; then u4="\033[1;36m${WAN4}  (${COUNTRY4} ${ISP4})\033[0m"; else u4="${C_BAD}未检出${C_RST}"; fi
-    if [ -n "$WAN6" ]; then u6="\033[1;36m${WAN6}  (${COUNTRY6} ${ISP6})\033[0m"; else u6="${C_BAD}未检出${C_RST}"; fi
+    if [ -n "$WAN4" ]; then
+      u4="\033[1;36m${WAN4}  (${EMOJI4} ${COUNTRY4} ${ISP4})\033[0m"
+    else
+      u4="${C_BAD}未检出${C_RST}"
+    fi
+    if [ -n "$WAN6" ]; then
+      u6="\033[1;36m${WAN6}  (${EMOJI6} ${COUNTRY6} ${ISP6})\033[0m"
+    else
+      u6="${C_BAD}未检出${C_RST}"
+    fi
 
     echo -e "OS : \033[1;36m${info}\033[0m"
     echo -e "v4 : ${u4}"
