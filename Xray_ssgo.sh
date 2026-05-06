@@ -35,6 +35,7 @@ C_TXT="\033[1;36m"
 
 KW_POOL=("\033[1;32m" "\033[1;35m" "\033[1;33m" "\033[1;91m" "\033[1;92m")
 _LAST_KW_IDX=-1
+MENU_RIGHT_ANCHOR=0
 
 pick_kw_color(){
   local idx=$((RANDOM % ${#KW_POOL[@]}))
@@ -92,29 +93,37 @@ term_cols(){
   echo "$c"
 }
 
+# 右列起始锚点（按每个菜单首行自动确定）
+MENU_RIGHT_ANCHOR=0
+
+# 右列起始锚点（每个菜单进入时重置为0）
+MENU_RIGHT_ANCHOR=0
+
 menu_row2_auto(){
   local lnum="$1" ltxt="$2" rnum="${3:-}" rtxt="${4:-}"
-  local left right cols llen rlen pad i target
+  local left right llen pad i
+  local first_gap=6
 
-  left=$(printf "%b%2s.%b %s" "$C_NUM" "$lnum" "$C_RST" "$(auto_hl "$ltxt")")
+  # 左右数字都固定2宽，保证 1./10. 的点位自身对齐
+  left="$(printf "%b%2s.%b %s" "$C_NUM" "$lnum" "$C_RST" "$(auto_hl "$ltxt")")"
 
   if [ -z "$rnum" ] || [ -z "$rtxt" ]; then
     printf "%s\n" "$left"
     return
   fi
 
-  right=$(printf "%b%2s.%b %s" "$C_NUM" "$rnum" "$C_RST" "$(auto_hl "$rtxt")")
+  right="$(printf "%b%2s.%b %s" "$C_NUM" "$rnum" "$C_RST" "$(auto_hl "$rtxt")")"
 
-  cols="$(tput cols 2>/dev/null || stty size 2>/dev/null | awk '{print $2}' || echo 80)"
-  [ -z "$cols" ] && cols=80
+  llen="$(vlen "$left")"
 
-  llen=$(vlen "$left")
-  rlen=$(vlen "$right")
+  # 仅首行确定锚点：左列后固定6空格
+  if [ "${MENU_RIGHT_ANCHOR:-0}" -le 0 ]; then
+    MENU_RIGHT_ANCHOR=$((llen + first_gap))
+  fi
 
-  # 目标是让右列靠右，但始终双列；太窄时最小留2空格
-  target=$((cols - rlen))
-  pad=$((target - llen))
-  [ "$pad" -lt 2 ] && pad=2
+  # 后续行只按锚点对齐（不再强制>=6）
+  pad=$((MENU_RIGHT_ANCHOR - llen))
+  [ "$pad" -lt 1 ] && pad=1   # 防止粘连
 
   printf "%s" "$left"
   for ((i=0; i<pad; i++)); do printf " "; done
@@ -123,6 +132,7 @@ menu_row2_auto(){
 
 menu_item_auto(){
   local num="$1" txt="$2"
+  # 数字宽度固定2位，保证 1./10. 的点位垂直对齐
   printf "%b%2s.%b %s\n" "$C_NUM" "$num" "$C_RST" "$(auto_hl "$txt")"
 }
 
@@ -1732,6 +1742,7 @@ manage_outbound_menu(){
 xray_menu(){
   while true; do
     cls
+    MENU_RIGHT_ANCHOR=0
     local xs as hs
     if [ -x "$XRAY_BIN" ]; then xs=$(is_running xray && echo "\033[1;36m运行中\033[0m" || echo "${C_BAD}未启动${C_RST}"); else xs="${C_BAD}未安装${C_RST}"; fi
     if service_exists tunnel-argo; then as=$(is_running tunnel-argo && echo "\033[1;36m运行中\033[0m" || echo "${C_BAD}未启动${C_RST}"); else as="${C_BAD}未配置${C_RST}"; fi
@@ -1776,6 +1787,7 @@ xray_menu(){
 sbox_menu(){
   while true; do
     cls
+    MENU_RIGHT_ANCHOR=0
     local st
     if [ -x "$SB_BIN" ]; then st=$(is_running tuic-box && echo "\033[1;36m运行中\033[0m" || echo "${C_BAD}未启动${C_RST}"); else st="${C_BAD}未安装${C_RST}"; fi
     echo -e "${C_SUB}=============== Sbox管理 ===============${C_RST}"
@@ -1872,6 +1884,7 @@ main_menu(){
 
   while true; do
     cls
+    MENU_RIGHT_ANCHOR=0
     [ -f "$IPCACHE" ] && {
       local mt
       mt=$(stat -c %Y "$IPCACHE" 2>/dev/null || echo 0)
