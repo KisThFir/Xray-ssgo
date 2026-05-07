@@ -1,10 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================================================
-#  一体化管理脚本（Xray / Argo / HY2 / Tuic / 出站策略）
-#  - 完整可覆盖版（修复：HY2协议 / 端口跳跃 / LXC降级）
-# =========================================================
+# ---- UTF-8 bootstrap (for emoji/Unicode) ----
+ensure_utf8_locale() {
+  # 已是 UTF-8 就不动
+  case "${LC_ALL:-${LANG:-}}" in
+    *UTF-8*|*utf8*) return 0 ;;
+  esac
+
+  # 优先 C.UTF-8（Debian/Ubuntu/Alpine 常见）
+  if locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+    return 0
+  fi
+
+  # 其次 en_US.UTF-8
+  if locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+    return 0
+  fi
+
+  # 再其次 zh_CN.UTF-8（有些中文环境只有这个）
+  if locale -a 2>/dev/null | grep -qi '^zh_CN\.utf8$'; then
+    export LANG=zh_CN.UTF-8
+    export LC_ALL=zh_CN.UTF-8
+    return 0
+  fi
+}
+ensure_utf8_locale
 
 # ========== Color ==========
 C_RST="\033[0m"
@@ -438,12 +463,26 @@ save_outbound(){
 # ========== IP / ISP ==========
 country_flag(){
   local cc="${1^^}"
-  [ ${#cc} -ne 2 ] && { echo ""; return; }
-  local o1 o2
+  [[ "$cc" =~ ^[A-Z]{2}$ ]] || { echo ""; return; }
+
+  # 非 UTF-8 环境不输出 emoji，避免 F1EFF1F5
+  case "${LC_ALL:-${LANG:-}}" in
+    *UTF-8*|*utf8*) ;;
+    *) echo ""; return ;;
+  esac
+
+  local o1 o2 cp1 cp2
   o1=$(printf '%d' "'${cc:0:1}")
   o2=$(printf '%d' "'${cc:1:1}")
-  printf "\\U1F1$(printf '%X' $((o1-65+0xE6)))\\U1F1$(printf '%X' $((o2-65+0xE6)))"
+
+  # Regional Indicator: U+1F1E6..U+1F1FF
+  cp1=$((0x1F1E6 + o1 - 65))
+  cp2=$((0x1F1E6 + o2 - 65))
+
+  # 必须8位十六进制，避免某些环境不识别
+  printf "\\U%08X\\U%08X" "$cp1" "$cp2"
 }
+
 normalize_country_code(){
   local c="$(echo "${1:-}" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   local cu="$(echo "$c" | tr '[:lower:]' '[:upper:]')"
