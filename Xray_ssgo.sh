@@ -479,8 +479,7 @@ country_flag(){
   cp1=$((0x1F1E6 + o1 - 65))
   cp2=$((0x1F1E6 + o2 - 65))
 
-  # 必须8位十六进制，避免某些环境不识别
-  printf "\\U%08X\\U%08X" "$cp1" "$cp2"
+  eval "printf '%s' \$'\\U$(printf '%08X' "$cp1")\\U$(printf '%08X' "$cp2")'"
 }
 
 normalize_country_code(){
