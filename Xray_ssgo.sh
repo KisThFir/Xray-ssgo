@@ -476,7 +476,7 @@ apply_hy2_hop(){
               }
             }
           },
-          "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}
+          "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}
         }]')"
     done
     update_xray --argjson hs "$hops" '.inbounds += $hs'
@@ -991,10 +991,10 @@ EOF
   update_xray 'del(.inbounds[]? | select(.port==8080 or .port==8081 or .port==8082))'
 
   local ws xh ss
-  ws='{"port":8080,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":"'"${uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/argo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}'
+  ws='{"port":8080,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":"'"${uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/argo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
   xh=$(jq -nc --arg uuid "$uuid" --arg mode "$XHTTP_MODE" --argjson extra "$XHTTP_EXTRA_JSON" \
-      '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}')
-  ss='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'"${ss_method}"'","password":"'"${ss_pass}"'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}'
+      '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}')
+  ss='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'"${ss_method}"'","password":"'"${ss_pass}"'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
   update_xray --argjson ws "$ws" --argjson xh "$xh" --argjson ss "$ss" '.inbounds += [$ws,$xh,$ss]'
 
   local cmd svcname="tunnel-argo"
@@ -1181,7 +1181,7 @@ install_hy2(){
       "quicParams":{"congestion":"bbr","bbrProfile":"standard","maxIdleTimeout":30,"keepAlivePeriod":10,"disablePathMTUDiscovery":false}
     }
   },
-  "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}
+  "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}
 }')"
   else
     hy2="$(jq -nc \
@@ -1205,7 +1205,7 @@ install_hy2(){
       "quicParams":{"congestion":"bbr","bbrProfile":"standard","maxIdleTimeout":30,"keepAlivePeriod":10,"disablePathMTUDiscovery":false}
     }
   },
-  "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}
+  "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}
 }')"
   fi
 
