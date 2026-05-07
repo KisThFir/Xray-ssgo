@@ -119,7 +119,7 @@ term_cols(){
 
 menu_row2_auto(){
   local lnum="$1" ltxt="$2" rnum="${3:-}" rtxt="${4:-}"
-  local left right right_col=40
+  local left right right_col=20
 
   left="$(printf "%b%2s.%b %s" "$C_NUM" "$lnum" "$C_RST" "$(auto_hl "$ltxt")")"
 
