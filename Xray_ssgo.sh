@@ -166,7 +166,7 @@ SWAP_LOG="/tmp/swap.log"
 
 UUID_FALLBACK="$(cat /proc/sys/kernel/random/uuid)"
 CFIP=${CFIP:-'172.67.146.150'}
-SS_FIXED_IP="104.18.40.49"
+SS_FIXED_IP="172.64.147.74"
 
 SB_FIXED_VER="v1.13.11"
 
@@ -230,19 +230,48 @@ is_running(){
 need_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
 pkg_install(){
-  local p
+  [ "$#" -eq 0 ] && return 0
+
+  local mgr=""
+  if command -v apt-get >/dev/null 2>&1; then
+    mgr="apt"
+  elif command -v dnf >/dev/null 2>&1; then
+    mgr="dnf"
+  elif command -v yum >/dev/null 2>&1; then
+    mgr="yum"
+  elif command -v apk >/dev/null 2>&1; then
+    mgr="apk"
+  else
+    red "未找到可用包管理器"
+    return 1
+  fi
+
+  local pkgs=() p mapped
   for p in "$@"; do
-    if command -v apt-get >/dev/null 2>&1; then
-      apt-get update -y >/dev/null 2>&1 || true
-      DEBIAN_FRONTEND=noninteractive apt-get install -y "$p" >/dev/null 2>&1 || true
-    elif command -v dnf >/dev/null 2>&1; then
-      dnf install -y "$p" >/dev/null 2>&1 || true
-    elif command -v yum >/dev/null 2>&1; then
-      yum install -y "$p" >/dev/null 2>&1 || true
-    elif command -v apk >/dev/null 2>&1; then
-      apk add --no-cache "$p" >/dev/null 2>&1 || true
-    fi
+    mapped="$p"
+    case "$mgr:$p" in
+      dnf:iproute2|yum:iproute2) mapped="iproute" ;;   # RHEL系包名
+      apk:coreutils) mapped="coreutils" ;;             # 保留
+      apt:iproute2|apk:iproute2) mapped="iproute2" ;;  # Debian/Alpine
+    esac
+    pkgs+=("$mapped")
   done
+
+  case "$mgr" in
+    apt)
+      apt-get update -y >/dev/null 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}" >/dev/null 2>&1 || true
+      ;;
+    dnf)
+      dnf install -y "${pkgs[@]}" >/dev/null 2>&1 || true
+      ;;
+    yum)
+      yum install -y "${pkgs[@]}" >/dev/null 2>&1 || true
+      ;;
+    apk)
+      apk add --no-cache "${pkgs[@]}" >/dev/null 2>&1 || true
+      ;;
+  esac
 }
 
 ensure_deps(){
@@ -1170,7 +1199,7 @@ show_xray_nodes(){
       m="$(echo "$ssib" | jq -r '.settings.method')"
       pw="$(echo "$ssib" | jq -r '.settings.password')"
       b64="$(echo -n "${m}:${pw}" | base64 | tr -d '\n')"
-      purple "ss://${b64}@${SS_FIXED_IP}:80?type=ws&security=none&host=${d}&path=%2Fssgo#$(url_encode "$ns")"; echo
+      purple "ss://${b64}@${SS_FIXED_IP}:8080?type=ws&security=none&host=${d}&path=%2Fssgo#$(url_encode "$ns")"; echo
       cnt=$((cnt+1))
     fi
   fi
