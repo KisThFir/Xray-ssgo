@@ -1031,125 +1031,158 @@ install_hy2(){
   install_xray || return 1
   ensure_dns_rule || return 1
 
-  local domain token port auth obfs prof up down hop
+  local mode domain token port auth obfs prof up down hop
+  prompt "HY2模式(1=一键最简 2=自定义，默认1): " mode
+  [ -z "${mode:-}" ] && mode=1
+  [[ "$mode" =~ ^[12]$ ]] || mode=1
+
   prompt "HY2域名: " domain; [ -z "$domain" ] && { red "域名不能为空"; return 1; }
   prompt "Cloudflare API Token: " token; [ -z "$token" ] && { red "Token不能为空"; return 1; }
 
-  prompt "HY2端口(默认16738): " port; [ -z "$port" ] && port=16738
+  prompt "HY2端口(默认38167): " port; [ -z "$port" ] && port=38167
   [[ "$port" =~ ^[0-9]+$ ]] || { red "端口无效"; return 1; }
 
   prompt "HY2认证AUTH(回车随机UUID): " auth; [ -z "$auth" ] && auth="$(gen_uuid)"
-  prompt "HY2混淆密码OBFS(回车随机UUID): " obfs; [ -z "$obfs" ] && obfs="$(gen_uuid)"
 
-  echo "带宽档位: 1.默认(50/250) 2.自定义"
-prompt "选择(默认1): " prof
-case "$prof" in
-  2)
-    prompt "上行Mbps(默认50): " up
-    prompt "下行Mbps(默认250): " down
-    [ -z "$up" ] && up=50
-    [ -z "$down" ] && down=250
-    [[ "$up" =~ ^[0-9]+$ ]] || up=50
-    [[ "$down" =~ ^[0-9]+$ ]] || down=250
-    ;;
-  *) up=50; down=250 ;;
-esac
+  # 默认值
+  obfs=""
+  up=""
+  down=""
+  hop=""
 
-  prompt "端口跳跃(回车关闭；范围38167-38186=20个；或列表38167,38170): " hop
-hop="$(echo "${hop:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [ "$mode" = "2" ]; then
+    prompt "HY2混淆密码OBFS(回车随机UUID): " obfs
+    [ -z "$obfs" ] && obfs="$(gen_uuid)"
 
-if [ -n "$hop" ]; then
-  if [[ "$hop" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-    [ "${BASH_REMATCH[1]}" -gt "${BASH_REMATCH[2]}" ] && { red "跳跃范围无效"; return 1; }
+    echo "带宽档位: 1.默认(50/250) 2.自定义"
+    prompt "选择(默认1): " prof
+    case "$prof" in
+      2)
+        prompt "上行Mbps(默认50): " up
+        prompt "下行Mbps(默认250): " down
+        [ -z "$up" ] && up=50
+        [ -z "$down" ] && down=250
+        [[ "$up" =~ ^[0-9]+$ ]] || up=50
+        [[ "$down" =~ ^[0-9]+$ ]] || down=250
+        ;;
+      *) up=50; down=250 ;;
+    esac
+
+    prompt "端口跳跃(回车关闭；范围38167-38186=20个；或列表38167,38170): " hop
+    hop="$(echo "${hop:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+    if [ -n "$hop" ]; then
+      if [[ "$hop" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        [ "${BASH_REMATCH[1]}" -gt "${BASH_REMATCH[2]}" ] && { red "跳跃范围无效"; return 1; }
+      else
+        local ok=1 IFS=',' one
+        for one in $hop; do
+          one="$(echo "$one" | sed 's/[[:space:]]//g')"
+          [[ "$one" =~ ^[0-9]+$ ]] || { ok=0; break; }
+        done
+        [ "$ok" -eq 1 ] || { red "端口列表无效"; return 1; }
+      fi
+    fi
   else
-    local ok=1 IFS=',' one
-    for one in $hop; do
-      one="$(echo "$one" | sed 's/[[:space:]]//g')"
-      [[ "$one" =~ ^[0-9]+$ ]] || { ok=0; break; }
-    done
-    [ "$ok" -eq 1 ] || { red "端口列表无效"; return 1; }
+    yellow "一键最简模式：无混淆、无端口跳跃、不设置带宽范围（bbr+standard）"
   fi
-fi
 
   issue_cert_cf "$domain" "$token" "$TLS_DIR_HY2" || return 1
 
   open_port "$port" udp
-if [ -n "$hop" ]; then
-  if command -v ufw >/dev/null 2>&1; then
-    if [[ "$hop" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-      ufw allow "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}/udp" >/dev/null 2>&1 || true
-    else
-      IFS=',' read -r -a _arr <<< "$hop"
-      for _p in "${_arr[@]}"; do
-        _p="$(echo "$_p" | sed 's/[[:space:]]//g')"
-        [[ "$_p" =~ ^[0-9]+$ ]] && ufw allow "${_p}/udp" >/dev/null 2>&1 || true
-      done
+  if [ -n "$hop" ]; then
+    if command -v ufw >/dev/null 2>&1; then
+      if [[ "$hop" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        ufw allow "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}/udp" >/dev/null 2>&1 || true
+      else
+        IFS=',' read -r -a _arr <<< "$hop"
+        for _p in "${_arr[@]}"; do
+          _p="$(echo "$_p" | sed 's/[[:space:]]//g')"
+          [[ "$_p" =~ ^[0-9]+$ ]] && ufw allow "${_p}/udp" >/dev/null 2>&1 || true
+        done
+      fi
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1; then
+      if [[ "$hop" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        firewall-cmd --add-port="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}/udp" --permanent >/dev/null 2>&1 || true
+      else
+        IFS=',' read -r -a _arr <<< "$hop"
+        for _p in "${_arr[@]}"; do
+          _p="$(echo "$_p" | sed 's/[[:space:]]//g')"
+          [[ "$_p" =~ ^[0-9]+$ ]] && firewall-cmd --add-port="${_p}/udp" --permanent >/dev/null 2>&1 || true
+        done
+      fi
+      firewall-cmd --reload >/dev/null 2>&1 || true
     fi
   fi
-  if command -v firewall-cmd >/dev/null 2>&1; then
-    if [[ "$hop" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-      firewall-cmd --add-port="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}/udp" --permanent >/dev/null 2>&1 || true
-    else
-      IFS=',' read -r -a _arr <<< "$hop"
-      for _p in "${_arr[@]}"; do
-        _p="$(echo "$_p" | sed 's/[[:space:]]//g')"
-        [[ "$_p" =~ ^[0-9]+$ ]] && firewall-cmd --add-port="${_p}/udp" --permanent >/dev/null 2>&1 || true
-      done
-    fi
-    firewall-cmd --reload >/dev/null 2>&1 || true
-  fi
-fi
 
   # 删除旧HY2（含hop）
-  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or (.tag|startswith("hy2-in-hop-")) or .protocol=="hysteria" or .protocol=="hysteria2"))'
+  update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or ((.tag // "")|startswith("hy2-in-hop-")) or .protocol=="hysteria" or .protocol=="hysteria2"))'
   clear_hy2_hop_rules || true
 
   local hy2
-  hy2="$(jq -nc \
-    --argjson p "$port" \
-    --arg auth "$auth" \
-    --arg obfs "$obfs" \
-    --arg domain "$domain" \
-    --arg crt "${TLS_DIR_HY2}/${domain}.crt" \
---arg key "${TLS_DIR_HY2}/${domain}.key" \
+  if [ -n "$obfs" ]; then
+    hy2="$(jq -nc \
+      --argjson p "$port" \
+      --arg auth "$auth" \
+      --arg obfs "$obfs" \
+      --arg domain "$domain" \
+      --arg crt "${TLS_DIR_HY2}/${domain}.crt" \
+      --arg key "${TLS_DIR_HY2}/${domain}.key" \
 '{
   "tag":"hy2-in",
   "listen":"::",
   "port":$p,
   "protocol":"hysteria",
-  "settings":{
-    "version":2,
-    "clients":[{"auth":$auth,"email":"hy2@local"}]
-  },
+  "settings":{"version":2,"clients":[{"auth":$auth,"email":"hy2@local"}]},
   "streamSettings":{
     "network":"hysteria",
     "security":"tls",
-    "tlsSettings":{
-      "alpn":["h3"],
-      "certificates":[{"certificateFile":$crt,"keyFile":$key}],
-      "serverName":$domain
-    },
+    "tlsSettings":{"alpn":["h3"],"certificates":[{"certificateFile":$crt,"keyFile":$key}],"serverName":$domain},
     "hysteriaSettings":{"version":2},
     "finalmask":{
       "udp":[{"type":"salamander","settings":{"password":$obfs}}],
-      "quicParams":{
-        "congestion":"bbr",
-        "bbrProfile":"standard",
-        "maxIdleTimeout":30,
-        "keepAlivePeriod":10,
-        "disablePathMTUDiscovery":false
-      }
+      "quicParams":{"congestion":"bbr","bbrProfile":"standard","maxIdleTimeout":30,"keepAlivePeriod":10,"disablePathMTUDiscovery":false}
     }
   },
   "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}
 }')"
+  else
+    hy2="$(jq -nc \
+      --argjson p "$port" \
+      --arg auth "$auth" \
+      --arg domain "$domain" \
+      --arg crt "${TLS_DIR_HY2}/${domain}.crt" \
+      --arg key "${TLS_DIR_HY2}/${domain}.key" \
+'{
+  "tag":"hy2-in",
+  "listen":"::",
+  "port":$p,
+  "protocol":"hysteria",
+  "settings":{"version":2,"clients":[{"auth":$auth,"email":"hy2@local"}]},
+  "streamSettings":{
+    "network":"hysteria",
+    "security":"tls",
+    "tlsSettings":{"alpn":["h3"],"certificates":[{"certificateFile":$crt,"keyFile":$key}],"serverName":$domain},
+    "hysteriaSettings":{"version":2},
+    "finalmask":{
+      "quicParams":{"congestion":"bbr","bbrProfile":"standard","maxIdleTimeout":30,"keepAlivePeriod":10,"disablePathMTUDiscovery":false}
+    }
+  },
+  "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}
+}')"
+  fi
 
   update_xray --argjson ib "$hy2" '.inbounds += [$ib]'
 
-  # 跳跃应用（iptables / native fallback）
-  apply_hy2_hop "$port" "$auth" "$obfs" "$domain" "${TLS_DIR_HY2}/${domain}.crt" "${TLS_DIR_HY2}/${domain}.key" "${hop:-}"
+  # 仅自定义模式且填写了hop时才应用跳跃
+  if [ -n "$hop" ]; then
+    apply_hy2_hop "$port" "$auth" "$obfs" "$domain" "${TLS_DIR_HY2}/${domain}.crt" "${TLS_DIR_HY2}/${domain}.key" "$hop"
+    echo "$hop" > "${WORK}/hy2_hop_range.txt"
+  else
+    rm -f "${WORK}/hy2_hop_range.txt"
+  fi
 
-  # 配置检查
   if ! "$XRAY_BIN" run -test -c "$XRAY_CONF" >/tmp/xray_hy2_check.log 2>&1; then
     red "Xray 配置校验失败"
     tail -n 80 /tmp/xray_hy2_check.log 2>/dev/null || true
@@ -1158,14 +1191,13 @@ fi
 
   svc restart xray
   write_hy2_state "$port" "$domain" "$auth" "$up" "$down" "$obfs"
-  if [ -n "$hop" ]; then
-  echo "$hop" > "${WORK}/hy2_hop_range.txt"
-else
-  rm -f "${WORK}/hy2_hop_range.txt"
-fi
 
   green "HY2 安装成功（Xray）"
-  green "默认参数: UP=${up} DOWN=${down}, congestion=bbr, bbrProfile=standard"
+  if [ "$mode" = "1" ]; then
+    green "当前为一键最简：无混淆 / 无跳跃 / bbr+standard"
+  else
+    green "当前为自定义：UP=${up} DOWN=${down}, bbr+standard"
+  fi
 }
 
 uninstall_hy2(){
@@ -1245,7 +1277,7 @@ show_xray_nodes(){
   if [ -f "$HY2_STATE" ]; then
     # shellcheck disable=SC1090
     . "$HY2_STATE" 2>/dev/null || true
-    if [ -n "${PORT:-}" ] && [ -n "${DOMAIN:-}" ] && [ -n "${PASS:-}" ] && [ -n "${OBFS:-}" ]; then
+    if [ -n "${PORT:-}" ] && [ -n "${DOMAIN:-}" ] && [ -n "${PASS:-}" ]; then
       local hn hop_param=""
       hn="${BASE_FULL} - HY2"
       if [ -f "${WORK}/hy2_hop_range.txt" ]; then
@@ -1253,7 +1285,11 @@ show_xray_nodes(){
         hr="$(cat "${WORK}/hy2_hop_range.txt" 2>/dev/null || true)"
         [ -n "$hr" ] && hop_param="&mport=${hr}&ports=${hr}"
       fi
-      purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}${hop_param}#$(url_encode "$hn")"; echo
+      if [ -n "${OBFS:-}" ]; then
+  purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}${hop_param}#$(url_encode "$hn")"; echo
+else
+  purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0${hop_param}#$(url_encode "$hn")"; echo
+fi
       cnt=$((cnt+1))
     fi
   fi
