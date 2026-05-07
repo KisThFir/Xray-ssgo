@@ -147,7 +147,9 @@ SB_BIN="${SB}/sing-box"
 SB_CONF="${SB}/config.json"
 SB_STATE="${SB}/tuic_state.conf"
 
-TLS_DIR="/etc/tuic/tls"
+TLS_BASE="/etc/ssgo/tls"
+TLS_DIR_TUIC="${TLS_BASE}/tuic"
+TLS_DIR_HY2="${TLS_BASE}/hy2"
 
 ARGO_DOMAIN="${WORK}/domain_argo.txt"
 ARGO_YML="${WORK}/tunnel_argo.yml"
@@ -351,12 +353,11 @@ iptables_nat_writable(){
 }
 
 save_hy2_hop_state(){
-  local mode="$1" base="$2" start="$3" end="$4"
+  local mode="$1" base="$2" spec="$3" _unused="$4"
   cat > "$HY2_HOP_STATE" <<EOF
 mode=${mode}
 base=${base}
-start=${start}
-end=${end}
+spec=${spec}
 EOF
 }
 
@@ -367,8 +368,18 @@ clear_hy2_hop_rules(){
   [ -z "${mode:-}" ] && return 0
 
   if [ "${mode}" = "iptables" ]; then
-    command -v iptables >/dev/null 2>&1 && iptables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "${base}" 2>/dev/null || true
-    command -v ip6tables >/dev/null 2>&1 && ip6tables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "${base}" 2>/dev/null || true
+    if [ -n "${spec:-}" ] && command -v iptables >/dev/null 2>&1; then
+      if [[ "$spec" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        iptables -t nat -D PREROUTING -p udp --dport "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}" -j REDIRECT --to-ports "${base}" 2>/dev/null || true
+      else
+        local IFS=',' p
+        for p in $spec; do
+          p="$(echo "$p" | sed 's/[[:space:]]//g')"
+          [[ "$p" =~ ^[0-9]+$ ]] || continue
+          iptables -t nat -D PREROUTING -p udp --dport "$p" -j REDIRECT --to-ports "${base}" 2>/dev/null || true
+        done
+      fi
+    fi
   else
     [ -f "$XRAY_CONF" ] && update_xray 'del(.inbounds[]? | select(.tag|startswith("hy2-in-hop-")))' || true
   fi
@@ -376,16 +387,32 @@ clear_hy2_hop_rules(){
 }
 
 apply_hy2_hop(){
-  local base_port="$1" auth="$2" obfs="$3" domain="$4" crt="$5" key="$6" start="$7" end="$8"
+  local base_port="$1" auth="$2" obfs="$3" domain="$4" crt="$5" key="$6" hop_spec="${7:-}"
 
   clear_hy2_hop_rules || true
-  [ -z "$start" ] || [ -z "$end" ] && return 0
+  [ -z "$hop_spec" ] && return 0
 
-  # 无权限/LXC => native多入站
+  # 解析 hop_spec：支持 "a-b" 或 "a,b,c"
+  local ports=()
+  if [[ "$hop_spec" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+    local s="${BASH_REMATCH[1]}" e="${BASH_REMATCH[2]}" p
+    [ "$s" -gt "$e" ] && { red "端口范围无效: $hop_spec"; return 1; }
+    for ((p=s; p<=e; p++)); do ports+=("$p"); done
+  else
+    local IFS=',' one
+    for one in $hop_spec; do
+      one="$(echo "$one" | sed 's/[[:space:]]//g')"
+      [[ "$one" =~ ^[0-9]+$ ]] || continue
+      ports+=("$one")
+    done
+    [ "${#ports[@]}" -eq 0 ] && { red "端口列表无效: $hop_spec"; return 1; }
+  fi
+
+  # 无权限/LXC => native 多入站（只加你输入的端口）
   if is_lxc_env || ! iptables_nat_writable; then
     yellow "HY2端口跳跃：检测到LXC/NAT受限，使用应用层多端口监听模式"
     local p hops='[]'
-    for ((p=start; p<=end; p++)); do
+    for p in "${ports[@]}"; do
       [ "$p" -eq "$base_port" ] && continue
       hops="$(echo "$hops" | jq \
         --argjson pp "$p" \
@@ -419,16 +446,25 @@ apply_hy2_hop(){
                 "disablePathMTUDiscovery":false
               }
             }
-          }
+          },
+          "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}
         }]')"
     done
     update_xray --argjson hs "$hops" '.inbounds += $hs'
-    save_hy2_hop_state "native" "$base_port" "$start" "$end"
+    save_hy2_hop_state "native" "$base_port" "$hop_spec" ""
   else
-    yellow "HY2端口跳跃：使用iptables REDIRECT模式"
-    iptables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "${base_port}" 2>/dev/null || true
-    command -v ip6tables >/dev/null 2>&1 && ip6tables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "${base_port}" 2>/dev/null || true
-    save_hy2_hop_state "iptables" "$base_port" "$start" "$end"
+    # iptables 模式：只做 IPv4，不加 ip6tables（IPv6 直连 base port）
+    yellow "HY2端口跳跃：使用iptables REDIRECT模式（仅IPv4）"
+    if [[ "$hop_spec" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      local s="${BASH_REMATCH[1]}" e="${BASH_REMATCH[2]}"
+      iptables -t nat -A PREROUTING -p udp --dport "${s}:${e}" -j REDIRECT --to-ports "${base_port}" 2>/dev/null || true
+    else
+      local p
+      for p in "${ports[@]}"; do
+        iptables -t nat -A PREROUTING -p udp --dport "$p" -j REDIRECT --to-ports "${base_port}" 2>/dev/null || true
+      done
+    fi
+    save_hy2_hop_state "iptables" "$base_port" "$hop_spec" ""
   fi
 }
 
@@ -881,10 +917,10 @@ EOF
   update_xray 'del(.inbounds[]? | select(.port==8080 or .port==8081 or .port==8082))'
 
   local ws xh ss
-  ws='{"port":8080,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":"'"${uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/argo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
+  ws='{"port":8080,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":"'"${uuid}"'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/argo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}'
   xh=$(jq -nc --arg uuid "$uuid" --arg mode "$XHTTP_MODE" --argjson extra "$XHTTP_EXTRA_JSON" \
-      '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}')
-  ss='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'"${ss_method}"'","password":"'"${ss_pass}"'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
+      '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}')
+  ss='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'"${ss_method}"'","password":"'"${ss_pass}"'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}'
   update_xray --argjson ws "$ws" --argjson xh "$xh" --argjson ss "$ss" '.inbounds += [$ws,$xh,$ss]'
 
   local cmd svcname="tunnel-argo"
@@ -957,7 +993,7 @@ install_hy2(){
   install_xray || return 1
   ensure_dns_rule || return 1
 
-  local domain token port auth obfs prof up down hop hop_start hop_end
+  local domain token port auth obfs prof up down hop
   prompt "HY2域名: " domain; [ -z "$domain" ] && { red "域名不能为空"; return 1; }
   prompt "Cloudflare API Token: " token; [ -z "$token" ] && { red "Token不能为空"; return 1; }
 
@@ -967,37 +1003,64 @@ install_hy2(){
   prompt "HY2认证AUTH(回车随机UUID): " auth; [ -z "$auth" ] && auth="$(gen_uuid)"
   prompt "HY2混淆密码OBFS(回车随机UUID): " obfs; [ -z "$obfs" ] && obfs="$(gen_uuid)"
 
-  echo "带宽档位: 1.温和(30/120) 2.均衡(50/250) 3.激进(80/320) 4.自定义"
-  prompt "选择(默认2): " prof
-  case "$prof" in
-    1) up=30; down=120 ;;
-    3) up=80; down=320 ;;
-    4)
-      prompt "上行Mbps(默认50): " up
-      prompt "下行Mbps(默认250): " down
-      [ -z "$up" ] && up=50
-      [ -z "$down" ] && down=250
-      [[ "$up" =~ ^[0-9]+$ ]] || up=50
-      [[ "$down" =~ ^[0-9]+$ ]] || down=250
-      ;;
-    *) up=50; down=250 ;;
-  esac
+  echo "带宽档位: 1.默认(50/250) 2.自定义"
+prompt "选择(默认1): " prof
+case "$prof" in
+  2)
+    prompt "上行Mbps(默认50): " up
+    prompt "下行Mbps(默认250): " down
+    [ -z "$up" ] && up=50
+    [ -z "$down" ] && down=250
+    [[ "$up" =~ ^[0-9]+$ ]] || up=50
+    [[ "$down" =~ ^[0-9]+$ ]] || down=250
+    ;;
+  *) up=50; down=250 ;;
+esac
 
-  prompt "端口跳跃范围(如20000-20100, 回车关闭): " hop
-  if [[ "${hop:-}" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-    hop_start="${BASH_REMATCH[1]}"
-    hop_end="${BASH_REMATCH[2]}"
-    [ "$hop_start" -gt "$hop_end" ] && { red "跳跃范围无效"; return 1; }
+  prompt "端口跳跃(回车关闭；范围38167-38186=20个；或列表38167,38170): " hop
+hop="$(echo "${hop:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+if [ -n "$hop" ]; then
+  if [[ "$hop" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+    [ "${BASH_REMATCH[1]}" -gt "${BASH_REMATCH[2]}" ] && { red "跳跃范围无效"; return 1; }
   else
-    hop_start=""
-    hop_end=""
+    local ok=1 IFS=',' one
+    for one in $hop; do
+      one="$(echo "$one" | sed 's/[[:space:]]//g')"
+      [[ "$one" =~ ^[0-9]+$ ]] || { ok=0; break; }
+    done
+    [ "$ok" -eq 1 ] || { red "端口列表无效"; return 1; }
   fi
+fi
 
-  issue_cert_cf "$domain" "$token" || return 1
+  issue_cert_cf "$domain" "$token" "$TLS_DIR_HY2" || return 1
+
   open_port "$port" udp
-  if [ -n "$hop_start" ] && [ -n "$hop_end" ]; then
-    open_port "$hop_start" udp || true
+if [ -n "$hop" ]; then
+  if command -v ufw >/dev/null 2>&1; then
+    if [[ "$hop" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      ufw allow "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}/udp" >/dev/null 2>&1 || true
+    else
+      IFS=',' read -r -a _arr <<< "$hop"
+      for _p in "${_arr[@]}"; do
+        _p="$(echo "$_p" | sed 's/[[:space:]]//g')"
+        [[ "$_p" =~ ^[0-9]+$ ]] && ufw allow "${_p}/udp" >/dev/null 2>&1 || true
+      done
+    fi
   fi
+  if command -v firewall-cmd >/dev/null 2>&1; then
+    if [[ "$hop" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      firewall-cmd --add-port="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}/udp" --permanent >/dev/null 2>&1 || true
+    else
+      IFS=',' read -r -a _arr <<< "$hop"
+      for _p in "${_arr[@]}"; do
+        _p="$(echo "$_p" | sed 's/[[:space:]]//g')"
+        [[ "$_p" =~ ^[0-9]+$ ]] && firewall-cmd --add-port="${_p}/udp" --permanent >/dev/null 2>&1 || true
+      done
+    fi
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+fi
 
   # 删除旧HY2（含hop）
   update_xray 'del(.inbounds[]? | select(.tag=="hy2-in" or (.tag|startswith("hy2-in-hop-")) or .protocol=="hysteria" or .protocol=="hysteria2"))'
@@ -1009,8 +1072,8 @@ install_hy2(){
     --arg auth "$auth" \
     --arg obfs "$obfs" \
     --arg domain "$domain" \
-    --arg crt "${TLS_DIR}/${domain}.crt" \
-    --arg key "${TLS_DIR}/${domain}.key" \
+    --arg crt "${TLS_DIR_HY2}/${domain}.crt" \
+--arg key "${TLS_DIR_HY2}/${domain}.key" \
 '{
   "tag":"hy2-in",
   "listen":"::",
@@ -1040,13 +1103,13 @@ install_hy2(){
       }
     }
   },
-  "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}
+  "sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}
 }')"
 
   update_xray --argjson ib "$hy2" '.inbounds += [$ib]'
 
   # 跳跃应用（iptables / native fallback）
-  apply_hy2_hop "$port" "$auth" "$obfs" "$domain" "${TLS_DIR}/${domain}.crt" "${TLS_DIR}/${domain}.key" "${hop_start:-}" "${hop_end:-}"
+  apply_hy2_hop "$port" "$auth" "$obfs" "$domain" "${TLS_DIR_HY2}/${domain}.crt" "${TLS_DIR_HY2}/${domain}.key" "${hop:-}"
 
   # 配置检查
   if ! "$XRAY_BIN" run -test -c "$XRAY_CONF" >/tmp/xray_hy2_check.log 2>&1; then
@@ -1057,11 +1120,11 @@ install_hy2(){
 
   svc restart xray
   write_hy2_state "$port" "$domain" "$auth" "$up" "$down" "$obfs"
-  if [ -n "$hop_start" ] && [ -n "$hop_end" ]; then
-    echo "${hop_start}-${hop_end}" > "${WORK}/hy2_hop_range.txt"
-  else
-    rm -f "${WORK}/hy2_hop_range.txt"
-  fi
+  if [ -n "$hop" ]; then
+  echo "$hop" > "${WORK}/hy2_hop_range.txt"
+else
+  rm -f "${WORK}/hy2_hop_range.txt"
+fi
 
   green "HY2 安装成功（Xray）"
   green "默认参数: UP=${up} DOWN=${down}, congestion=bbr, bbrProfile=standard"
@@ -1369,10 +1432,18 @@ ensure_acme(){
 }
 
 issue_cert_cf(){
-  local d="$1" token="$2"
-  local crt="${TLS_DIR}/${d}.crt" key="${TLS_DIR}/${d}.key"
-  mkdir -p "$TLS_DIR"
-  [ -s "$crt" ] && [ -s "$key" ] && { green "证书已存在: $d"; return 0; }
+  local d="$1" token="$2" cert_dir="${3:-$TLS_DIR_TUIC}"
+  local crt="${cert_dir}/${d}.crt" key="${cert_dir}/${d}.key"
+  mkdir -p "$cert_dir"
+if [ -s "$crt" ] && [ -s "$key" ]; then
+  # 证书在未来30天内仍有效则复用，否则重新签发
+  if openssl x509 -in "$crt" -noout -checkend $((30*24*3600)) >/dev/null 2>&1; then
+    green "证书已存在且有效(>30天): $d"
+    return 0
+  else
+    yellow "证书即将过期或已过期，开始续签: $d"
+  fi
+fi
 
   ensure_acme || return 1
   export CF_Token="$token"
@@ -1403,7 +1474,7 @@ build_sbox_dns_servers_json(){
 
 write_tuic_conf(){
   local domain="$1" port="$2" cc="$3" uuid="$4"
-  local crt="${TLS_DIR}/${domain}.crt" key="${TLS_DIR}/${domain}.key"
+  local crt="${TLS_DIR_TUIC}/${domain}.crt" key="${TLS_DIR_TUIC}/${domain}.key"
   local v6_compat v6_strict dns_servers dns_rules_json route_rules_json
   v6_compat="$(build_v6_compat_domains_json)"
   v6_strict="$(build_v6_strict_domains_json)"
@@ -1519,7 +1590,8 @@ install_tuic(){
   prompt "Tuic UUID(回车默认 ${def}): " uuid
   [ -z "$uuid" ] && uuid="$def"
 
-  issue_cert_cf "$domain" "$token" || return 1
+  issue_cert_cf "$domain" "$token" "$TLS_DIR_TUIC" || return 1
+
   open_port "$port" udp
   write_tuic_conf "$domain" "$port" "$cc" "$uuid"
   ensure_tuic_service
@@ -1815,7 +1887,7 @@ full_uninstall(){
   swap_disable_all >/dev/null 2>&1 || true
 
   rm -f /usr/local/bin/ssgo /usr/bin/ssgo
-  rm -rf "$WORK" "$SB" "$TLS_DIR"
+  rm -rf "$WORK" "$SB" "$TLS_DIR_TUIC" "$TLS_DIR_HY2"
 
   green "已彻底卸载"
 }
