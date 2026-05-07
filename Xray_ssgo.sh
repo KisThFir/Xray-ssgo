@@ -828,13 +828,22 @@ EOF
 apply_policy_xray(){
   [ -f "$XRAY_CONF" ] || return 0
   ensure_dns_rule
+
+  # 关键修复：默认出站必须是 direct-v4，不能让 dns-out 排第一
   update_xray '
-    .outbounds |= (
-      map(select(.tag!="direct" and .tag!="direct-v4" and .tag!="direct-v6" and .tag!="block-v4"))
-      + [{"protocol":"freedom","tag":"direct-v4","settings":{"domainStrategy":"UseIPv4"}}]
-      + [{"protocol":"freedom","tag":"direct-v6","settings":{"domainStrategy":"UseIPv6"}}]
-      + [{"protocol":"blackhole","tag":"block-v4"}]
+    .outbounds = (
+      [
+        {"protocol":"freedom","tag":"direct-v4","settings":{"domainStrategy":"UseIPv4"}},
+        {"protocol":"freedom","tag":"direct-v6","settings":{"domainStrategy":"UseIPv6"}},
+        {"protocol":"blackhole","tag":"block-v4"}
+      ]
+      + (
+          [ .outbounds[]? | select(.tag=="dns-out") ]
+          | if length>0 then . else [{"protocol":"dns","tag":"dns-out"}] end
+        )
+      + [ .outbounds[]? | select(.tag!="direct" and .tag!="direct-v4" and .tag!="direct-v6" and .tag!="block-v4" and .tag!="dns-out") ]
     )'
+
   update_xray 'del(.routing.rules[]? | select(.tag=="v6-compat-rule" or .tag=="v6-strict-route-rule" or .tag=="v6-strict-reject-rule"))'
 
   local compat strict
