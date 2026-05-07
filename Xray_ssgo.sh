@@ -698,16 +698,12 @@ csv_to_json_unique(){
   done
   printf '%s\n' "${clean_arr[@]}" | awk 'NF' | sort -u | jq -Rsc 'split("\n")|map(select(length>0))'
 }
-yt_domains_csv(){ echo "youtube.com,youtu.be,googlevideo.com,ytimg.com"; }
+
 build_v6_compat_domains_json(){
-  local d="$V6_COMPAT_SITES"
-  [ "$YOUTUBE_MODE" = "1" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
-  csv_to_json_unique "$d"
+  csv_to_json_unique "$V6_COMPAT_SITES"
 }
 build_v6_strict_domains_json(){
-  local d="$V6_STRICT_SITES"
-  [ "$YOUTUBE_MODE" = "2" ] && d="$(merge_csv "$d" "$(yt_domains_csv)")"
-  csv_to_json_unique "$d"
+  csv_to_json_unique "$V6_STRICT_SITES"
 }
 yt_mode_str(){
   case "$YOUTUBE_MODE" in
@@ -761,6 +757,21 @@ ensure_dns_rule(){
   update_xray '.routing.rules += [{"type":"field","port":"53","outboundTag":"dns-out"},{"type":"field","protocol":"dns","outboundTag":"dns-out"}]'
 }
 
+ensure_geosite(){
+  [ -s "${WORK}/geosite.dat" ] && return 0
+  yellow "未检测到 geosite.dat，尝试下载..."
+
+  # 常用规则源（稳定）
+  if smart_download "${WORK}/geosite.dat" \
+    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" 1000000; then
+    green "geosite.dat 已就绪"
+    return 0
+  fi
+
+  red "geosite.dat 下载失败"
+  return 1
+}
+
 xray_uuid(){
   if [ -f "$XRAY_CONF" ]; then
     local u
@@ -792,7 +803,7 @@ install_xray(){
     smart_download "${WORK}/xray.zip" "$url" 5000000 || { red "下载Xray失败"; return 1; }
     unzip -o "${WORK}/xray.zip" -d "${WORK}/" >/dev/null 2>&1 || return 1
     chmod +x "$XRAY_BIN"
-    rm -f "${WORK}/xray.zip" "${WORK}/geosite.dat" "${WORK}/geoip.dat" "${WORK}/README.md" "${WORK}/LICENSE"
+    rm -f "${WORK}/xray.zip" "${WORK}/README.md" "${WORK}/LICENSE"
   fi
 
   if ! service_exists xray; then
@@ -829,7 +840,7 @@ apply_policy_xray(){
   [ -f "$XRAY_CONF" ] || return 0
   ensure_dns_rule
 
-  # 关键修复：默认出站必须是 direct-v4，不能让 dns-out 排第一
+  # 保证默认出站顺序（direct-v4 在前）
   update_xray '
     .outbounds = (
       [
@@ -844,12 +855,37 @@ apply_policy_xray(){
       + [ .outbounds[]? | select(.tag!="direct" and .tag!="direct-v4" and .tag!="direct-v6" and .tag!="block-v4" and .tag!="dns-out") ]
     )'
 
-  update_xray 'del(.routing.rules[]? | select(.tag=="v6-compat-rule" or .tag=="v6-strict-route-rule" or .tag=="v6-strict-reject-rule"))'
+  # 清理旧规则（含 geosite 新tag）
+  update_xray 'del(.routing.rules[]? | select(
+    .tag=="v6-compat-rule" or
+    .tag=="v6-strict-route-rule" or
+    .tag=="v6-strict-reject-rule" or
+    .tag=="v6-geosite-compat-rule" or
+    .tag=="v6-geosite-strict-route-rule" or
+    .tag=="v6-geosite-strict-reject-rule"
+  ))'
 
   local compat strict
   compat="$(build_v6_compat_domains_json)"
   strict="$(build_v6_strict_domains_json)"
 
+  # YouTube: geosite 规则
+  if [ "$YOUTUBE_MODE" = "2" ]; then
+    if ensure_geosite; then
+      update_xray '.routing.rules += [{"type":"field","domain":["geosite:youtube"],"ip":["0.0.0.0/0"],"outboundTag":"block-v4","tag":"v6-geosite-strict-reject-rule"}]'
+      update_xray '.routing.rules += [{"type":"field","domain":["geosite:youtube"],"outboundTag":"direct-v6","tag":"v6-geosite-strict-route-rule"}]'
+    else
+      red "geosite 不可用，YouTube 严格规则未应用"
+    fi
+  elif [ "$YOUTUBE_MODE" = "1" ]; then
+    if ensure_geosite; then
+      update_xray '.routing.rules += [{"type":"field","domain":["geosite:youtube"],"outboundTag":"direct-v6","tag":"v6-geosite-compat-rule"}]'
+    else
+      red "geosite 不可用，YouTube 兼容规则未应用"
+    fi
+  fi
+
+  # 你手动加的自定义域名规则（原逻辑保留）
   if [ "$(echo "$strict" | jq 'length')" -gt 0 ]; then
     update_xray --argjson d "$strict" '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"ip":["0.0.0.0/0"],"outboundTag":"block-v4","tag":"v6-strict-reject-rule"}]'
     update_xray --argjson d "$strict" '.routing.rules += [{"type":"field","domain":($d|map("domain:"+.)),"outboundTag":"direct-v6","tag":"v6-strict-route-rule"}]'
