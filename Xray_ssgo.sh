@@ -169,6 +169,7 @@ CFIP=${CFIP:-'172.67.146.150'}
 SS_FIXED_IP="172.64.147.74"
 
 SB_FIXED_VER="v1.13.11"
+HY2_SELF_SNI_DEFAULT="www.amd.com"
 
 # 快捷方式拉取源（可通过环境变量覆盖）
 SCRIPT_URL_DEFAULT="https://raw.githubusercontent.com/KisThFir/Xray-ssgo/refs/heads/main/Xray_ssgo.sh"
@@ -1051,7 +1052,7 @@ uninstall_argo(){
 
 # ========== HY2 ==========
 write_hy2_state(){
-  local port="$1" domain="$2" pass="$3" up="$4" down="$5" obfs="$6"
+  local port="$1" domain="$2" pass="$3" up="$4" down="$5" obfs="$6" cert_mode="$7"
   mkdir -p "$WORK"
   cat > "$HY2_STATE" <<EOF
 PORT=$port
@@ -1060,6 +1061,7 @@ PASS=$pass
 UP=$up
 DOWN=$down
 OBFS=$obfs
+CERT_MODE=$cert_mode
 EOF
 }
 
@@ -1067,13 +1069,29 @@ install_hy2(){
   install_xray || return 1
   ensure_dns_rule || return 1
 
-  local mode domain token port auth obfs prof up down hop
+  local mode cert_mode domain token port auth obfs prof up down hop cert_file key_file cert_mode_saved
   prompt "HY2模式(1=一键最简 2=自定义，默认1): " mode
   [ -z "${mode:-}" ] && mode=1
   [[ "$mode" =~ ^[12]$ ]] || mode=1
 
-  prompt "HY2域名: " domain; [ -z "$domain" ] && { red "域名不能为空"; return 1; }
-  prompt "Cloudflare API Token: " token; [ -z "$token" ] && { red "Token不能为空"; return 1; }
+  prompt "证书模式(1=本机自签 2=CF令牌签发，默认1): " cert_mode
+  [ -z "${cert_mode:-}" ] && cert_mode=1
+  [[ "$cert_mode" =~ ^[12]$ ]] || cert_mode=1
+
+  if [ "$cert_mode" = "1" ]; then
+    prompt "HY2伪装域名(回车默认 ${HY2_SELF_SNI_DEFAULT}): " domain
+    [ -z "$domain" ] && domain="$HY2_SELF_SNI_DEFAULT"
+    issue_cert_selfsigned "$domain" "$TLS_DIR_HY2" || return 1
+    cert_mode_saved="self"
+  else
+    prompt "HY2域名: " domain; [ -z "$domain" ] && { red "域名不能为空"; return 1; }
+    prompt "Cloudflare API Token: " token; [ -z "$token" ] && { red "Token不能为空"; return 1; }
+    issue_cert_cf "$domain" "$token" "$TLS_DIR_HY2" || return 1
+    cert_mode_saved="cf"
+  fi
+
+  cert_file="${TLS_DIR_HY2}/${domain}.crt"
+  key_file="${TLS_DIR_HY2}/${domain}.key"
 
   prompt "HY2端口(默认38167): " port; [ -z "$port" ] && port=38167
   [[ "$port" =~ ^[0-9]+$ ]] || { red "端口无效"; return 1; }
@@ -1123,8 +1141,6 @@ install_hy2(){
     yellow "一键最简模式：无混淆、无端口跳跃、不设置带宽范围（bbr+standard）"
   fi
 
-  issue_cert_cf "$domain" "$token" "$TLS_DIR_HY2" || return 1
-
   open_port "$port" udp
   if [ -n "$hop" ]; then
     if command -v ufw >/dev/null 2>&1; then
@@ -1163,8 +1179,8 @@ install_hy2(){
       --arg auth "$auth" \
       --arg obfs "$obfs" \
       --arg domain "$domain" \
-      --arg crt "${TLS_DIR_HY2}/${domain}.crt" \
-      --arg key "${TLS_DIR_HY2}/${domain}.key" \
+      --arg crt "$cert_file" \
+      --arg key "$key_file" \
 '{
   "tag":"hy2-in",
   "listen":"::",
@@ -1188,8 +1204,8 @@ install_hy2(){
       --argjson p "$port" \
       --arg auth "$auth" \
       --arg domain "$domain" \
-      --arg crt "${TLS_DIR_HY2}/${domain}.crt" \
-      --arg key "${TLS_DIR_HY2}/${domain}.key" \
+      --arg crt "$cert_file" \
+      --arg key "$key_file" \
 '{
   "tag":"hy2-in",
   "listen":"::",
@@ -1213,7 +1229,7 @@ install_hy2(){
 
   # 仅自定义模式且填写了hop时才应用跳跃
   if [ -n "$hop" ]; then
-    apply_hy2_hop "$port" "$auth" "$obfs" "$domain" "${TLS_DIR_HY2}/${domain}.crt" "${TLS_DIR_HY2}/${domain}.key" "$hop"
+    apply_hy2_hop "$port" "$auth" "$obfs" "$domain" "$cert_file" "$key_file" "$hop"
     echo "$hop" > "${WORK}/hy2_hop_range.txt"
   else
     rm -f "${WORK}/hy2_hop_range.txt"
@@ -1226,9 +1242,14 @@ install_hy2(){
   fi
 
   svc restart xray
-  write_hy2_state "$port" "$domain" "$auth" "$up" "$down" "$obfs"
+  write_hy2_state "$port" "$domain" "$auth" "$up" "$down" "$obfs" "$cert_mode_saved"
 
   green "HY2 安装成功（Xray）"
+  if [ "$cert_mode_saved" = "self" ]; then
+    green "证书模式：本机自签（客户端默认 insecure=1）"
+  else
+    green "证书模式：CF令牌签发（客户端默认 insecure=0）"
+  fi
   if [ "$mode" = "1" ]; then
     green "当前为一键最简：无混淆 / 无跳跃 / bbr+standard"
   else
@@ -1314,18 +1335,21 @@ show_xray_nodes(){
     # shellcheck disable=SC1090
     . "$HY2_STATE" 2>/dev/null || true
     if [ -n "${PORT:-}" ] && [ -n "${DOMAIN:-}" ] && [ -n "${PASS:-}" ]; then
-      local hn hop_param=""
+      local hn hop_param="" insecure="0"
       hn="${BASE_FULL} - HY2"
       if [ -f "${WORK}/hy2_hop_range.txt" ]; then
         local hr
         hr="$(cat "${WORK}/hy2_hop_range.txt" 2>/dev/null || true)"
         [ -n "$hr" ] && hop_param="&mport=${hr}&ports=${hr}"
       fi
+      if [ "${CERT_MODE:-cf}" = "self" ]; then
+        insecure="1"
+      fi
       if [ -n "${OBFS:-}" ]; then
-  purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0&obfs=salamander&obfs-password=${OBFS}${hop_param}#$(url_encode "$hn")"; echo
-else
-  purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=0${hop_param}#$(url_encode "$hn")"; echo
-fi
+        purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=${insecure}&obfs=salamander&obfs-password=${OBFS}${hop_param}#$(url_encode "$hn")"; echo
+      else
+        purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=${insecure}${hop_param}#$(url_encode "$hn")"; echo
+      fi
       cnt=$((cnt+1))
     fi
   fi
@@ -1563,6 +1587,32 @@ fi
   "$HOME/.acme.sh/acme.sh" --installcert -d "$d" --fullchainpath "$crt" --keypath "$key" --ecc >/tmp/acme_installcert.log 2>&1 || true
   [ -s "$crt" ] && [ -s "$key" ] || { red "安装证书失败"; tail -n 80 /tmp/acme_installcert.log 2>/dev/null || true; return 1; }
   green "证书安装成功"
+}
+
+issue_cert_selfsigned(){
+  local d="$1" cert_dir="${2:-$TLS_DIR_HY2}"
+  local crt="${cert_dir}/${d}.crt" key="${cert_dir}/${d}.key"
+  mkdir -p "$cert_dir"
+
+  if [ -s "$crt" ] && [ -s "$key" ]; then
+    if openssl x509 -in "$crt" -noout -checkend $((30*24*3600)) >/dev/null 2>&1; then
+      green "自签证书已存在且有效(>30天): $d"
+      return 0
+    else
+      yellow "自签证书即将过期或已过期，重新生成: $d"
+    fi
+  fi
+
+  openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 3650 \
+    -subj "/CN=${d}" \
+    -keyout "$key" -out "$crt" >/tmp/selfsign_issue.log 2>&1 || {
+    red "自签证书生成失败"
+    tail -n 80 /tmp/selfsign_issue.log 2>/dev/null || true
+    return 1
+  }
+
+  [ -s "$crt" ] && [ -s "$key" ] || { red "自签证书文件异常"; return 1; }
+  green "自签证书生成成功: $d"
 }
 
 open_port(){
