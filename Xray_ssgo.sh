@@ -181,7 +181,8 @@ RESTART_HOURS=0
 XHTTP_MODE="auto"
 XHTTP_EXTRA_JSON='{"xPaddingObfsMode":true,"xPaddingMethod":"tokenish","xPaddingPlacement":"queryInHeader","xPaddingHeader":"y2k","xPaddingKey":"_y2k"}'
 
-YOUTUBE_MODE=0
+# YouTube 模式：1=关闭(默认) 2=严格
+YOUTUBE_MODE=1
 V6_COMPAT_SITES=""
 V6_STRICT_SITES=""
 
@@ -514,7 +515,7 @@ load_state(){
     YOUTUBE_MODE="$(awk -F= '/^YOUTUBE_MODE=/{print $2}' "$OUTBOUND_CONF" 2>/dev/null)"
     V6_COMPAT_SITES="$(awk -F= '/^V6_COMPAT_SITES=/{sub(/^V6_COMPAT_SITES=/,""); print}' "$OUTBOUND_CONF" 2>/dev/null)"
     V6_STRICT_SITES="$(awk -F= '/^V6_STRICT_SITES=/{sub(/^V6_STRICT_SITES=/,""); print}' "$OUTBOUND_CONF" 2>/dev/null)"
-    [[ "$YOUTUBE_MODE" =~ ^[012]$ ]] || YOUTUBE_MODE=0
+    [[ "$YOUTUBE_MODE" =~ ^[12]$ ]] || YOUTUBE_MODE=1
   fi
 }
 save_outbound(){
@@ -674,6 +675,17 @@ check_ip(){
   return 0
 }
 
+# 节点地址：优先IPv6（URL中需要[]），无IPv6再IPv4
+pick_node_host(){
+  if [ -n "${WAN6:-}" ]; then
+    echo "[${WAN6}]"
+  elif [ -n "${WAN4:-}" ]; then
+    echo "${WAN4}"
+  else
+    echo ""
+  fi
+}
+
 # ========== Domain helpers ==========
 normalize_domain_item(){
   local s="$1"
@@ -708,8 +720,6 @@ build_v6_strict_domains_json(){
 }
 yt_mode_str(){
   case "$YOUTUBE_MODE" in
-    0) echo "关闭" ;;
-    1) echo "兼容" ;;
     2) echo "严格" ;;
     *) echo "关闭" ;;
   esac
@@ -870,19 +880,13 @@ apply_policy_xray(){
   compat="$(build_v6_compat_domains_json)"
   strict="$(build_v6_strict_domains_json)"
 
-  # YouTube: geosite 规则
+  # YouTube：仅关闭/严格
   if [ "$YOUTUBE_MODE" = "2" ]; then
     if ensure_geosite; then
       update_xray '.routing.rules += [{"type":"field","domain":["geosite:youtube"],"ip":["0.0.0.0/0"],"outboundTag":"block-v4","tag":"v6-geosite-strict-reject-rule"}]'
       update_xray '.routing.rules += [{"type":"field","domain":["geosite:youtube"],"outboundTag":"direct-v6","tag":"v6-geosite-strict-route-rule"}]'
     else
       red "geosite 不可用，YouTube 严格规则未应用"
-    fi
-  elif [ "$YOUTUBE_MODE" = "1" ]; then
-    if ensure_geosite; then
-      update_xray '.routing.rules += [{"type":"field","domain":["geosite:youtube"],"outboundTag":"direct-v6","tag":"v6-geosite-compat-rule"}]'
-    else
-      red "geosite 不可用，YouTube 兼容规则未应用"
     fi
   fi
 
@@ -943,19 +947,22 @@ apply_policy_all(){
   green "出站规则已应用（Xray + Sbox）"
 }
 
+# 安装协议时询问是否开启 YouTube 严格V6出站
+ask_enable_youtube_strict(){
+  local yn
+  prompt "是否开启 YouTube 严格V6出站? (1=关闭 2=严格，默认1): " yn
+  case "$yn" in
+    2) YOUTUBE_MODE=2 ;;
+    *) YOUTUBE_MODE=1 ;;
+  esac
+  save_outbound
+  apply_policy_all || true
+}
+
 # ========== Argo ==========
 install_argo(){
   install_xray || return 1
   ensure_dns_rule || return 1
-
-  if [ ! -x "${WORK}/argo" ]; then
-    local a u
-    a="$(detect_cloudflared_arch)"
-    [ -z "$a" ] && { red "架构不支持cloudflared"; return 1; }
-    u="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${a}"
-    smart_download "${WORK}/argo" "$u" 15000000 || { red "下载cloudflared失败"; return 1; }
-    chmod +x "${WORK}/argo"
-  fi
 
   local domain auth ss_pass mc ss_method tunnel_id uuid
   prompt "Argo域名: " domain; [ -z "$domain" ] && { red "不能为空"; return 1; }
@@ -1034,7 +1041,8 @@ EOF
 
   svc restart xray
   svc restart "$svcname"
-  apply_policy_all || true
+
+  ask_enable_youtube_strict
   green "Argo 配置完成"
 }
 
@@ -1098,17 +1106,17 @@ install_hy2(){
 
   prompt "HY2认证AUTH(回车随机UUID): " auth; [ -z "$auth" ] && auth="$(gen_uuid)"
 
-  # 默认值
+  # 默认值（Mbps）
   obfs=""
-  up=""
-  down=""
+  up=50
+  down=250
   hop=""
 
   if [ "$mode" = "2" ]; then
     prompt "HY2混淆密码OBFS(回车随机UUID): " obfs
     [ -z "$obfs" ] && obfs="$(gen_uuid)"
 
-    echo "带宽档位: 1.默认(50/250) 2.自定义"
+    echo "带宽档位: 1.默认(50/250 Mbps) 2.自定义"
     prompt "选择(默认1): " prof
     case "$prof" in
       2)
@@ -1138,7 +1146,7 @@ install_hy2(){
       fi
     fi
   else
-    yellow "一键最简模式：无混淆、无端口跳跃、不设置带宽范围（bbr+standard）"
+    yellow "一键最简模式：无混淆、无端口跳跃、默认50/250 Mbps（客户端可改）"
   fi
 
   open_port "$port" udp
@@ -1244,6 +1252,8 @@ install_hy2(){
   svc restart xray
   write_hy2_state "$port" "$domain" "$auth" "$up" "$down" "$obfs" "$cert_mode_saved"
 
+  ask_enable_youtube_strict
+
   green "HY2 安装成功（Xray）"
   if [ "$cert_mode_saved" = "self" ]; then
     green "证书模式：本机自签（客户端默认 insecure=1）"
@@ -1251,9 +1261,9 @@ install_hy2(){
     green "证书模式：CF令牌签发（客户端默认 insecure=0）"
   fi
   if [ "$mode" = "1" ]; then
-    green "当前为一键最简：无混淆 / 无跳跃 / bbr+standard"
+    green "当前为一键最简：无混淆 / 无跳跃 / 默认50/250 Mbps"
   else
-    green "当前为自定义：UP=${up} DOWN=${down}, bbr+standard"
+    green "当前为自定义：UP=${up}Mbps DOWN=${down}Mbps"
   fi
 }
 
@@ -1274,7 +1284,7 @@ show_xray_nodes(){
   [ -f "$XRAY_CONF" ] || { red "xray未安装"; return; }
 
   local ip="" uuid cnt=0
-  [ -n "$WAN4" ] && ip="$WAN4" || ip="$WAN6"
+  ip="$(pick_node_host)"
   uuid="$(xray_uuid)"
   [ -z "$BASE_FULL" ] && BASE_FULL="Node"
 
@@ -1335,20 +1345,31 @@ show_xray_nodes(){
     # shellcheck disable=SC1090
     . "$HY2_STATE" 2>/dev/null || true
     if [ -n "${PORT:-}" ] && [ -n "${DOMAIN:-}" ] && [ -n "${PASS:-}" ]; then
-      local hn hop_param="" insecure="0"
+      local hn hop_param="" insecure="0" hy_host upmbps downmbps
       hn="${BASE_FULL} - HY2"
+
       if [ -f "${WORK}/hy2_hop_range.txt" ]; then
         local hr
         hr="$(cat "${WORK}/hy2_hop_range.txt" 2>/dev/null || true)"
         [ -n "$hr" ] && hop_param="&mport=${hr}&ports=${hr}"
       fi
+
       if [ "${CERT_MODE:-cf}" = "self" ]; then
         insecure="1"
       fi
+
+      hy_host="$ip"
+      [ -z "$hy_host" ] && hy_host="$DOMAIN"  # 兜底
+
+      upmbps="${UP:-50}"
+      downmbps="${DOWN:-250}"
+      [[ "$upmbps" =~ ^[0-9]+$ ]] || upmbps=50
+      [[ "$downmbps" =~ ^[0-9]+$ ]] || downmbps=250
+
       if [ -n "${OBFS:-}" ]; then
-        purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=${insecure}&obfs=salamander&obfs-password=${OBFS}${hop_param}#$(url_encode "$hn")"; echo
+        purple "hysteria2://${PASS}@${hy_host}:${PORT}?sni=${DOMAIN}&insecure=${insecure}&obfs=salamander&obfs-password=${OBFS}&upmbps=${upmbps}&downmbps=${downmbps}${hop_param}#$(url_encode "$hn")"; echo
       else
-        purple "hysteria2://${PASS}@${DOMAIN}:${PORT}?sni=${DOMAIN}&insecure=${insecure}${hop_param}#$(url_encode "$hn")"; echo
+        purple "hysteria2://${PASS}@${hy_host}:${PORT}?sni=${DOMAIN}&insecure=${insecure}&upmbps=${upmbps}&downmbps=${downmbps}${hop_param}#$(url_encode "$hn")"; echo
       fi
       cnt=$((cnt+1))
     fi
@@ -1410,7 +1431,9 @@ manage_socks5(){
           else
             update_xray --argjson p "$p" --arg u "$u" --arg pw "$pw" \
               '.inbounds += [{"tag":("socks-"+($p|tostring)),"port":$p,"listen":"0.0.0.0","protocol":"socks","settings":{"auth":"password","accounts":[{"user":$u,"pass":$pw}],"udp":true},"sniffing":{"enabled":true,"destOverride":["http","tls"],"metadataOnly":false}}]'
-            svc restart xray; green "添加成功"
+            svc restart xray
+            ask_enable_youtube_strict
+            green "添加成功"
           fi
         else red "输入无效"; fi
         pause ;;
@@ -1508,7 +1531,11 @@ manage_freeflow(){
           FF_PATH="/"
         fi
         printf '%s\n%s\n' "$FREEFLOW_MODE" "$FF_PATH" > "$FREEFLOW_CONF"
-        apply_freeflow; green "已更新"; pause ;;
+        apply_freeflow
+        if [ "$FREEFLOW_MODE" != "none" ]; then
+          ask_enable_youtube_strict
+        fi
+        green "已更新"; pause ;;
       2)
         [ "$FREEFLOW_MODE" = "none" ] && { red "请先启用"; pause; continue; }
         prompt "新path(回车保持): " p
@@ -2075,8 +2102,8 @@ manage_outbound_menu(){
     prompt "请选择: " c
     case "$c" in
       1)
-        prompt "输入模式(0关闭/1兼容/2严格): " m
-        [[ "$m" =~ ^[012]$ ]] || { red "输入无效"; pause; continue; }
+        prompt "输入模式(1关闭/2严格): " m
+        [[ "$m" =~ ^[12]$ ]] || { red "输入无效"; pause; continue; }
         YOUTUBE_MODE="$m"; save_outbound; apply_policy_all; green "已更新并应用"; pause ;;
       2)
         local s md
