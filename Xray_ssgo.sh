@@ -171,6 +171,12 @@ SS_FIXED_IP="172.64.147.74"
 SB_FIXED_VER="v1.13.11"
 HY2_SELF_SNI_DEFAULT="www.amd.com"
 
+# GitHub 下载加速策略
+GHFAST_PREFIX="https://ghfast.top/"
+GH_SPEED_THRESHOLD_MBPS=20          # 低于该速度切备用
+GH_SPEED_THRESHOLD_BPS=2500000      # 20*1000*1000/8
+GH_USE_FAST_MIRROR=0                # 0=主站优先 1=已锁定备用（不回切）
+
 # 快捷方式拉取源（可通过环境变量覆盖）
 SCRIPT_URL_DEFAULT="https://raw.githubusercontent.com/KisThFir/Xray-ssgo/refs/heads/main/Xray_ssgo.sh"
 SCRIPT_URL="${SCRIPT_URL:-$SCRIPT_URL_DEFAULT}"
@@ -329,26 +335,85 @@ detect_singbox_suffix(){
 normalize_path(){ [ -z "${1:-}" ] && echo "/" || { case "$1" in /*) echo "$1" ;; *) echo "/$1" ;; esac; }; }
 gen_uuid(){ cat /proc/sys/kernel/random/uuid; }
 
+is_github_url(){
+  case "$1" in
+    https://github.com/*|https://raw.githubusercontent.com/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ghfast_url(){
+  local u="$1"
+  echo "${GHFAST_PREFIX}${u}"
+}
+
 smart_download(){
-  local out="$1" url="$2" min="$3" t=0
+  local out="$1" url="$2" min="$3"
+  local t=0 u="" is_gh=0 elapsed sz speed
+
+  is_github_url "$url" && is_gh=1 || is_gh=0
+
   while [ "$t" -lt 3 ]; do
     rm -f "$out"
 
-    command -v curl >/dev/null 2>&1 && curl -L --connect-timeout 10 --max-time 120 -o "$out" "$url" >/dev/null 2>&1 || true
+    # 已锁定备用：GitHub 链接一律走 ghfast，不再回主站
+    if [ "$is_gh" -eq 1 ] && [ "${GH_USE_FAST_MIRROR:-0}" -eq 1 ]; then
+      u="$(ghfast_url "$url")"
+    else
+      u="$url"
+    fi
+
+    local ts_start ts_end
+    ts_start="$(date +%s)"
+
+    # 下载（curl 优先，wget 兜底）
+    if command -v curl >/dev/null 2>&1; then
+      curl -L --connect-timeout 10 --max-time 180 -o "$out" "$u" >/dev/null 2>&1 || true
+    fi
     if [ ! -s "$out" ] && command -v wget >/dev/null 2>&1; then
       if wget --help 2>&1 | grep -q -- '--show-progress'; then
-        wget -q --show-progress --timeout=30 --tries=1 -O "$out" "$url" || true
+        wget -q --show-progress --timeout=40 --tries=1 -O "$out" "$u" || true
       else
-        wget -q -T 30 -O "$out" "$url" || true
+        wget -q -T 40 -O "$out" "$u" || true
       fi
     fi
 
+    ts_end="$(date +%s)"
+    elapsed=$((ts_end - ts_start))
+    [ "$elapsed" -le 0 ] && elapsed=1
+
     if [ -f "$out" ]; then
-      local sz; sz=$(wc -c < "$out" 2>/dev/null || echo 0)
-      [ "${sz:-0}" -ge "$min" ] && return 0
+      sz="$(wc -c < "$out" 2>/dev/null || echo 0)"
+      speed=$((sz / elapsed))   # Bytes/s
+
+      # 文件合格
+      if [ "${sz:-0}" -ge "$min" ]; then
+        # 仅对 GitHub 主站测速，低于阈值则切备用并重下一轮
+        if [ "$is_gh" -eq 1 ] && [ "${GH_USE_FAST_MIRROR:-0}" -eq 0 ] && [ "$u" = "$url" ]; then
+          if [ "$speed" -lt "${GH_SPEED_THRESHOLD_BPS:-2500000}" ]; then
+            yellow "GitHub主站速度低于${GH_SPEED_THRESHOLD_MBPS}Mbps，切换并锁定 ghfast 备用源"
+            GH_USE_FAST_MIRROR=1
+            rm -f "$out"
+            t=$((t+1))
+            sleep 1
+            continue
+          fi
+        fi
+        return 0
+      fi
     fi
-    t=$((t+1)); sleep 2
+
+    # 如果主站失败且是 GitHub，立即切备用并锁定（避免后续反复失败）
+    if [ "$is_gh" -eq 1 ] && [ "${GH_USE_FAST_MIRROR:-0}" -eq 0 ] && [ "$u" = "$url" ]; then
+      yellow "GitHub主站下载失败，切换并锁定 ghfast 备用源"
+      GH_USE_FAST_MIRROR=1
+    fi
+
+    rm -f "$out"
+    t=$((t+1))
+    sleep 2
   done
+
   return 1
 }
 
@@ -960,15 +1025,48 @@ ask_enable_youtube_strict(){
 }
 
 # ========== Argo ==========
+install_cloudflared(){
+  mkdir -p "$WORK"
+
+  local arch url tmp bin
+  bin="${WORK}/argo"
+
+  arch="$(detect_cloudflared_arch)"
+  [ -z "$arch" ] && { red "架构不支持 cloudflared"; return 1; }
+
+  case "$arch" in
+    amd64) url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" ;;
+    arm64) url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" ;;
+    386)   url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-386" ;;
+    arm)   url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm" ;;
+    *) red "未知架构: $arch"; return 1 ;;
+  esac
+
+  # 已存在且可执行则复用
+  if [ -x "$bin" ] && "$bin" --version >/dev/null 2>&1; then
+    green "cloudflared 已存在，跳过下载"
+    return 0
+  fi
+
+  tmp="${WORK}/argo.tmp"
+  smart_download "$tmp" "$url" 10000000 || { red "下载 cloudflared 失败"; rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$bin"
+  chmod +x "$bin"
+
+  "$bin" --version >/dev/null 2>&1 || { red "cloudflared 校验失败"; rm -f "$bin"; return 1; }
+  green "cloudflared 安装完成"
+}
+
 install_argo(){
   install_xray || return 1
   ensure_dns_rule || return 1
-
+  install_cloudflared || return 1
+    
   local domain auth ss_pass mc ss_method tunnel_id uuid
   prompt "Argo域名: " domain; [ -z "$domain" ] && { red "不能为空"; return 1; }
   prompt "Argo JSON凭证: " auth; echo "$auth" | grep -q "TunnelSecret" || { red "必须是JSON凭证"; return 1; }
   prompt "SS密码(回车随机UUID): " ss_pass; [ -z "$ss_pass" ] && ss_pass="$(gen_uuid)"
-  prompt "SS加密(1:aes-128-gcm/2:aes-256-gcm): " mc; ss_method="aes-128-gcm"; [ "$mc" = "2" ] && ss_method="aes-256-gcm"
+  prompt "SS加密(1:aes-128-gcm 2:aes-256-gcm): " mc; ss_method="aes-128-gcm"; [ "$mc" = "2" ] && ss_method="aes-256-gcm"
 
   echo "$domain" > "$ARGO_DOMAIN"
   tunnel_id="$(echo "$auth" | jq -r '.TunnelID' 2>/dev/null || true)"
@@ -1004,6 +1102,8 @@ EOF
       '{"port":8081,"listen":"127.0.0.1","protocol":"vless","settings":{"clients":[{"id":$uuid}],"decryption":"none"},"streamSettings":{"network":"xhttp","security":"none","xhttpSettings":{"host":"","path":"/xgo","mode":$mode,"extra":$extra}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}')
   ss='{"port":8082,"listen":"127.0.0.1","protocol":"shadowsocks","settings":{"method":"'"${ss_method}"'","password":"'"${ss_pass}"'","network":"tcp,udp"},"streamSettings":{"network":"ws","security":"none","wsSettings":{"path":"/ssgo"}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":false}}'
   update_xray --argjson ws "$ws" --argjson xh "$xh" --argjson ss "$ss" '.inbounds += [$ws,$xh,$ss]'
+
+  [ -x "${WORK}/argo" ] || { red "cloudflared 不存在: ${WORK}/argo"; return 1; }
 
   local cmd svcname="tunnel-argo"
   cmd="${WORK}/argo tunnel --edge-ip-version auto --no-autoupdate --config ${ARGO_YML} run"
