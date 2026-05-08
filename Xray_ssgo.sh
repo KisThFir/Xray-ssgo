@@ -2444,15 +2444,38 @@ cpu_cores_disp(){
 cpu_usage_percent(){
   local user nice system idle iowait irq softirq steal guest guest_nice
   local total idle_all diff_total diff_idle usage
+  local s1_total s1_idle s2_total s2_idle
 
   read -r _ user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
   total=$((user+nice+system+idle+iowait+irq+softirq+steal))
   idle_all=$((idle+iowait))
 
+  # 首次调用：做一次短间隔双采样，避免固定0%
   if [ "${CPU_LAST_TOTAL:-0}" -eq 0 ] || [ "${CPU_LAST_IDLE:-0}" -eq 0 ]; then
-    CPU_LAST_TOTAL="$total"
-    CPU_LAST_IDLE="$idle_all"
-    echo "0"
+    s1_total="$total"
+    s1_idle="$idle_all"
+
+    sleep 0.2
+
+    read -r _ user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
+    s2_total=$((user+nice+system+idle+iowait+irq+softirq+steal))
+    s2_idle=$((idle+iowait))
+
+    diff_total=$((s2_total-s1_total))
+    diff_idle=$((s2_idle-s1_idle))
+
+    CPU_LAST_TOTAL="$s2_total"
+    CPU_LAST_IDLE="$s2_idle"
+
+    if [ "$diff_total" -le 0 ]; then
+      echo "0"
+      return
+    fi
+
+    usage=$(( (100*(diff_total-diff_idle))/diff_total ))
+    [ "$usage" -lt 0 ] && usage=0
+    [ "$usage" -gt 100 ] && usage=100
+    echo "$usage"
     return
   fi
 
@@ -2530,6 +2553,23 @@ cpu_use="$(cpu_usage_percent)"
 ms="$(mem_swap_used_disp)"
 mem="${ms%%|*}"
 swap="${ms#*|}"
+
+# IPv4/IPv6 显示内容
+if [ -n "${WAN4:-}" ]; then
+  u4="${EMOJI4} ${COUNTRY4} ${WAN4}"
+  [ -n "${ISP4:-}" ] && [ "${ISP4}" != "unknown" ] && u4="${u4} | ${ISP4}"
+  u4="\033[1;36m${u4}\033[0m"
+else
+  u4="${C_BAD}未检测到${C_RST}"
+fi
+
+if [ -n "${WAN6:-}" ]; then
+  u6="${EMOJI6} ${COUNTRY6} ${WAN6}"
+  [ -n "${ISP6:-}" ] && [ "${ISP6}" != "unknown" ] && u6="${u6} | ${ISP6}"
+  u6="\033[1;36m${u6}\033[0m"
+else
+  u6="${C_BAD}未检测到${C_RST}"
+fi
     echo -e "${C_DIM}================ 系统信息 ================${C_RST}"
 echo -e "OS   : \033[1;36m${osver} | ${arch} | ${ker} | ${virt}\033[0m"
 echo -e "CPU  : \033[1;36m${cpu_model} | ${cpu_cores}C | ${cpu_use}%\033[0m"
@@ -2539,7 +2579,7 @@ echo "-----------------------------------------------"
 echo -e "IPv4 : ${u4}"
 echo -e "IPv6 : ${u6}"
 echo "-----------------------------------------------"
-home_service_overview
+
 echo -e "${C_DIM}==========================================${C_RST}"
 echo
 
