@@ -200,6 +200,9 @@ ISP4="" ISP6=""
 EMOJI4="" EMOJI6=""
 BASE_REGION="Node"
 BASE_FULL="Node"
+# CPU usage cache
+CPU_LAST_TOTAL=0
+CPU_LAST_IDLE=0
 
 # ========== Service ==========
 is_alpine(){ [ -f /etc/alpine-release ]; }
@@ -2160,23 +2163,45 @@ EOF
 }
 
 full_uninstall(){
+  # 1) 停服务 + 取消自启
   svc stop tunnel-argo; svc disable tunnel-argo
   svc stop xray; svc disable xray
   svc stop tuic-box; svc disable tuic-box
 
+  # 2) 兜底杀进程（避免服务脚本失效时残留）
+  pkill -f '/etc/xray/argo tunnel' >/dev/null 2>&1 || true
+  pkill -x xray >/dev/null 2>&1 || true
+  pkill -x sing-box >/dev/null 2>&1 || true
+
+  # 3) 清 HY2 跳跃规则（iptables/native）
+  clear_hy2_hop_rules >/dev/null 2>&1 || true
+
+  # 4) 删服务文件
   rm -f /etc/init.d/tunnel-argo /etc/systemd/system/tunnel-argo.service
   rm -f /etc/init.d/xray /etc/systemd/system/xray.service
   rm -f /etc/init.d/tuic-box /etc/systemd/system/tuic-box.service
 
-  command -v systemctl >/dev/null 2>&1 && { systemctl daemon-reload >/dev/null 2>&1 || true; systemctl reset-failed >/dev/null 2>&1 || true; }
+  # 5) systemd 刷新
+  command -v systemctl >/dev/null 2>&1 && {
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed >/dev/null 2>&1 || true
+  }
 
-  command -v crontab >/dev/null 2>&1 && (crontab -l 2>/dev/null | sed '/#svc-restart-all/d') | crontab - 2>/dev/null || true
+  # 6) 清本脚本加的定时任务
+  command -v crontab >/dev/null 2>&1 && \
+    (crontab -l 2>/dev/null | sed '/#svc-restart-all/d') | crontab - 2>/dev/null || true
+
+  # 7) 清 swap（脚本创建的 /swapfile + zram）
   swap_disable_all >/dev/null 2>&1 || true
 
+  # 8) 清快捷方式
   rm -f /usr/local/bin/ssgo /usr/bin/ssgo
-  rm -rf "$WORK" "$SB" "$TLS_DIR_TUIC" "$TLS_DIR_HY2"
 
-  green "已彻底卸载"
+  # 9) 清配置/二进制目录
+  rm -rf "$WORK" "$SB"
+  rm -rf /etc/ssgo
+
+  green "已彻底卸载（服务/配置/快捷方式/定时任务/SWAP 已清理）"
 }
 
 # ========== Outbound menu ==========
@@ -2367,8 +2392,21 @@ detect_virt_name(){
   echo "UNKNOWN"
 }
 
-sys_info(){
-  local osv ker virt mem
+arch_disp(){
+  case "$(uname -m)" in
+    x86_64|amd64) echo "x64" ;;
+    i?86) echo "x86" ;;
+    aarch64|arm64) echo "arm64" ;;
+    armv7l|armv7|armhf) echo "armv7" ;;
+    armv6l|armv6) echo "armv6" ;;
+    s390x) echo "s390x" ;;
+    riscv64) echo "riscv64" ;;
+    *) uname -m ;;
+  esac
+}
+
+os_version_disp(){
+  local osv
   if is_alpine; then
     osv="Alpine $(cat /etc/alpine-release 2>/dev/null || echo "")"
   elif [ -f /etc/os-release ]; then
@@ -2381,15 +2419,81 @@ sys_info(){
   else
     osv="Linux"
   fi
-
-  ker="$(cut -d- -f1 < /proc/sys/kernel/osrelease 2>/dev/null || uname -r)"
-  virt="$(detect_virt_name)"
-  mem="$(awk '/MemTotal/{m=$2/1024; if(m>1024) printf"%.1fG",m/1024; else printf"%.0fM",m}' /proc/meminfo 2>/dev/null)"
-
-  printf "%s  |  %s  |  %s  |  %s" "$osv" "$ker" "$virt" "$mem"
+  echo "$osv"
 }
-mem_used_disp(){
-  awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{u=t-a; if(t>1024*1024) printf "%.1fG/%.1fG",u/1024/1024,t/1024/1024; else printf "%.0fM/%.0fM",u/1024,t/1024}' /proc/meminfo 2>/dev/null
+
+kernel_disp(){
+  cut -d- -f1 < /proc/sys/kernel/osrelease 2>/dev/null || uname -r
+}
+
+cpu_model_disp(){
+  local model
+  model="$(awk -F: '
+    /model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}
+    /Hardware/   {gsub(/^[ \t]+/, "", $2); print $2; exit}
+    /Processor/  {gsub(/^[ \t]+/, "", $2); print $2; exit}
+  ' /proc/cpuinfo 2>/dev/null)"
+  [ -z "$model" ] && model="$(uname -m)"
+  echo "$model"
+}
+
+cpu_cores_disp(){
+  nproc 2>/dev/null || awk '/^processor/{n++} END{print (n?n:1)}' /proc/cpuinfo 2>/dev/null
+}
+
+cpu_usage_percent(){
+  local user nice system idle iowait irq softirq steal guest guest_nice
+  local total idle_all diff_total diff_idle usage
+
+  read -r _ user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
+  total=$((user+nice+system+idle+iowait+irq+softirq+steal))
+  idle_all=$((idle+iowait))
+
+  if [ "${CPU_LAST_TOTAL:-0}" -eq 0 ] || [ "${CPU_LAST_IDLE:-0}" -eq 0 ]; then
+    CPU_LAST_TOTAL="$total"
+    CPU_LAST_IDLE="$idle_all"
+    echo "0"
+    return
+  fi
+
+  diff_total=$((total-CPU_LAST_TOTAL))
+  diff_idle=$((idle_all-CPU_LAST_IDLE))
+
+  CPU_LAST_TOTAL="$total"
+  CPU_LAST_IDLE="$idle_all"
+
+  if [ "$diff_total" -le 0 ]; then
+    echo "0"
+    return
+  fi
+
+  usage=$(( (100*(diff_total-diff_idle))/diff_total ))
+  [ "$usage" -lt 0 ] && usage=0
+  [ "$usage" -gt 100 ] && usage=100
+  echo "$usage"
+}
+
+mem_swap_used_disp(){
+  awk '
+    /MemTotal/      {mt=$2}
+    /MemAvailable/  {ma=$2}
+    /SwapTotal/     {st=$2}
+    /SwapFree/      {sf=$2}
+    END{
+      mu=mt-ma;
+      if (mt>1024*1024) mtxt=sprintf("%.1fG/%.1fG", mu/1024/1024, mt/1024/1024);
+      else              mtxt=sprintf("%.0fM/%.0fM", mu/1024, mt/1024);
+
+      if (st>0) {
+        su=st-sf;
+        if (st>1024*1024) stxt=sprintf("%.1fG/%.1fG", su/1024/1024, st/1024/1024);
+        else              stxt=sprintf("%.0fM/%.0fM", su/1024, st/1024);
+      } else {
+        stxt="";
+      }
+      printf "%s|%s", mtxt, stxt;
+    }
+  ' /proc/meminfo 2>/dev/null
 }
 
 # ========== Main ==========
@@ -2413,21 +2517,31 @@ main_menu(){
       [ "$mt" -gt "${IP_CACHE_MTIME:-0}" ] && IP_CACHE_MTIME="$mt" && load_ip_cache >/dev/null 2>&1 || true
     }
 
-    local info mem u4 u6
-    info="$(sys_info)"
-    mem="$(mem_used_disp)"
+    local osver arch ker virt cpu_model cpu_cores cpu_use ms u4 u6
+local mem swap
 
-    if [ -n "$WAN4" ]; then u4="\033[1;36m${WAN4} (${EMOJI4} ${COUNTRY4} ${ISP4})\033[0m"; else u4="${C_BAD}未检出${C_RST}"; fi
-    if [ -n "$WAN6" ]; then u6="\033[1;36m${WAN6} (${EMOJI6} ${COUNTRY6} ${ISP6})\033[0m"; else u6="${C_BAD}未检出${C_RST}"; fi
-
+osver="$(os_version_disp)"
+arch="$(arch_disp)"
+ker="$(kernel_disp)"
+virt="$(detect_virt_name)"
+cpu_model="$(cpu_model_disp)"
+cpu_cores="$(cpu_cores_disp)"
+cpu_use="$(cpu_usage_percent)"
+ms="$(mem_swap_used_disp)"
+mem="${ms%%|*}"
+swap="${ms#*|}"
     echo -e "${C_DIM}================ 系统信息 ================${C_RST}"
-    echo -e "OS   : \033[1;36m${info}\033[0m"
-    echo -e "Mem  : \033[1;36m${mem}\033[0m"
-    echo "-----------------------------------------------"
-    echo -e "IPv4 : ${u4}"
-    echo -e "IPv6 : ${u6}"
-    echo -e "${C_DIM}==========================================${C_RST}"
-    echo
+echo -e "OS   : \033[1;36m${osver} | ${arch} | ${ker} | ${virt}\033[0m"
+echo -e "CPU  : \033[1;36m${cpu_model} | ${cpu_cores}C | ${cpu_use}%\033[0m"
+echo -e "Mem  : \033[1;36m${mem}\033[0m"
+[ -n "$swap" ] && echo -e "Swap : \033[1;36m${swap}\033[0m"
+echo "-----------------------------------------------"
+echo -e "IPv4 : ${u4}"
+echo -e "IPv6 : ${u6}"
+echo "-----------------------------------------------"
+home_service_overview
+echo -e "${C_DIM}==========================================${C_RST}"
+echo
 
     menu_row2_auto "1" "管理Xray"   "5" "管理SWAP"
     menu_row2_auto "2" "管理Sbox"   "6" "创建快捷"
