@@ -670,14 +670,23 @@ load_ip_cache(){
   return 0
 }
 apply_base_name(){
-  local cc isp emo
+  local cc isp emo short_isp
   if [ -n "$COUNTRY4" ] || [ -n "$ISP4" ]; then
     cc="${COUNTRY4^^}"; isp="$ISP4"; emo="$EMOJI4"
   else
     cc="${COUNTRY6^^}"; isp="$ISP6"; emo="$EMOJI6"
   fi
   [ -z "$emo" ] && emo="$(country_flag "$cc" 2>/dev/null || true)"
-  if [ -n "$isp" ]; then BASE_FULL="${emo} ${cc} ${isp}"; else BASE_FULL="${emo} ${cc}"; fi
+
+  # 精简ISP名称：只保留第一个单词（通常为公司名称核心部分）
+  if [ -n "$isp" ]; then
+    # 使用awk截取第一个单词，并转换为首字母大写
+    short_isp=$(echo "$isp" | awk '{print toupper(substr($1,1,1)) tolower(substr($1,2))}')
+    BASE_FULL="${emo} ${cc} ${short_isp}"
+  else
+    BASE_FULL="${emo} ${cc}"
+  fi
+
   [ -z "$BASE_FULL" ] && BASE_FULL="Node"
 }
 
