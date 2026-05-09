@@ -1078,7 +1078,7 @@ install_argo(){
   prompt "Argo域名: " domain; [ -z "$domain" ] && { red "不能为空"; return 1; }
   prompt "Argo JSON凭证: " auth; echo "$auth" | grep -q "TunnelSecret" || { red "必须是JSON凭证"; return 1; }
   prompt "SS密码(回车随机UUID): " ss_pass; [ -z "$ss_pass" ] && ss_pass="$(gen_uuid)"
-  prompt "SS加密(1:aes-128-gcm 2:aes-256-gcm): " mc; ss_method="aes-128-gcm"; [ "$mc" = "2" ] && ss_method="aes-256-gcm"
+    prompt "SS加密(1=aes-128-gcm 2=aes-256-gcm，默认1): " mc; [ -z "$mc" ] && mc=1; ss_method="aes-128-gcm"; [ "$mc" = "2" ] && ss_method="aes-256-gcm"
 
   echo "$domain" > "$ARGO_DOMAIN"
   tunnel_id="$(echo "$auth" | jq -r '.TunnelID' 2>/dev/null || true)"
